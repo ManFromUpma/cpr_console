@@ -1,0 +1,134 @@
+"""Unit tests for the NSE EOD CPR scanner (no network)."""
+
+import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
+
+import pandas as pd
+
+from nse_cpr_scanner import (
+    apply_bullish_cpr_filters,
+    compute_cpr,
+    export_results,
+    normalize_bhavcopy,
+    split_shortlists,
+    tag_fo_symbols,
+)
+
+
+def _udi_cash():
+    return pd.DataFrame(
+        {
+            "TckrSymb": ["AAA", "BBB", "CCC", "AAA"],
+            "SctySrs": ["EQ", "EQ", "BE", "EQ"],
+            "OpnPric": [100.0, 50.0, 10.0, 999.0],
+            "HghPric": [100.2, 55.0, 12.0, 999.0],
+            "LwPric": [100.0, 45.0, 9.0, 999.0],
+            "ClsPric": [100.15, 46.0, 11.0, 999.0],
+        }
+    )
+
+
+class TestNormalize(unittest.TestCase):
+    def test_udi_columns_and_eq_filter(self):
+        out = normalize_bhavcopy(_udi_cash(), cash_only=True)
+        self.assertListEqual(sorted(out["SYMBOL"].tolist()), ["AAA", "BBB"])
+        self.assertIn("OPEN", out.columns)
+        self.assertIn("HIGH", out.columns)
+
+    def test_legacy_columns_pass_through(self):
+        raw = pd.DataFrame(
+            {
+                "SYMBOL": ["RELIANCE"],
+                "SERIES": ["EQ"],
+                "OPEN": [100],
+                "HIGH": [110],
+                "LOW": [100],
+                "CLOSE": [106],
+            }
+        )
+        out = normalize_bhavcopy(raw, cash_only=True)
+        self.assertEqual(out.iloc[0]["SYMBOL"], "RELIANCE")
+        self.assertEqual(out.iloc[0]["CLOSE"], 106)
+
+
+class TestComputeCpr(unittest.TestCase):
+    def test_standard_hlc(self):
+        df = pd.DataFrame(
+            {
+                "SYMBOL": ["X"],
+                "OPEN": [100],
+                "HIGH": [110],
+                "LOW": [100],
+                "CLOSE": [106],
+            }
+        )
+        out = compute_cpr(df).iloc[0]
+        self.assertAlmostEqual(out["Pivot"], 105.3333333333, places=6)
+        self.assertAlmostEqual(out["BC"], 105.0, places=6)
+        self.assertAlmostEqual(out["TC"], 105.6666666667, places=6)
+        self.assertAlmostEqual(out["CPR_Bottom"], 105.0, places=6)
+        self.assertAlmostEqual(out["CPR_Top"], 105.6666666667, places=6)
+        self.assertAlmostEqual(out["CPR_Width_Pct"], (0.6666666667 / 106) * 100, places=6)
+        self.assertEqual(out["CPR_Class"], "Moderate")
+        self.assertEqual(out["Bias"], "Bullish")
+        self.assertEqual(out["Price_Position"], "Above CPR")
+
+
+class TestFlagsAndTags(unittest.TestCase):
+    def test_narrow_bullish_flag(self):
+        df = pd.DataFrame(
+            {
+                "SYMBOL": ["NARROW"],
+                "OPEN": [100.0],
+                "HIGH": [100.2],
+                "LOW": [100.0],
+                "CLOSE": [100.15],
+            }
+        )
+        out = apply_bullish_cpr_filters(compute_cpr(df)).iloc[0]
+        self.assertEqual(out["CPR_Class"], "Narrow")
+        self.assertTrue(bool(out["Bullish_CPR"]))
+        self.assertFalse(bool(out["Bearish_CPR"]))
+
+    def test_bearish_flag(self):
+        df = pd.DataFrame(
+            {
+                "SYMBOL": ["WIDE"],
+                "OPEN": [50],
+                "HIGH": [55],
+                "LOW": [45],
+                "CLOSE": [46],
+            }
+        )
+        out = apply_bullish_cpr_filters(compute_cpr(df)).iloc[0]
+        self.assertEqual(out["Bias"], "Bearish")
+        self.assertEqual(out["Price_Position"], "Below CPR")
+        self.assertTrue(bool(out["Bearish_CPR"]))
+        self.assertFalse(bool(out["Bullish_CPR"]))
+
+    def test_fo_tag(self):
+        cash = pd.DataFrame({"SYMBOL": ["AAA", "BBB"]})
+        fo = pd.DataFrame({"SYMBOL": ["AAA", "AAA", "NIFTY"]})
+        tagged = tag_fo_symbols(cash, fo)
+        self.assertEqual(tagged.loc[tagged["SYMBOL"] == "AAA", "Segment"].iloc[0], "F&O + Cash")
+        self.assertEqual(tagged.loc[tagged["SYMBOL"] == "BBB", "Segment"].iloc[0], "Cash Only")
+
+
+class TestExport(unittest.TestCase):
+    def test_shortlists_and_csv(self):
+        cash = normalize_bhavcopy(_udi_cash(), cash_only=True)
+        cash = tag_fo_symbols(cash, pd.DataFrame({"SYMBOL": ["AAA"]}))
+        cash = apply_bullish_cpr_filters(compute_cpr(cash))
+        full, narrow, bullish, bearish, top20 = split_shortlists(cash)
+        self.assertGreaterEqual(len(full), 2)
+        self.assertTrue((narrow["CPR_Class"] == "Narrow").all() or narrow.empty)
+        with TemporaryDirectory() as tmp:
+            result = export_results(cash, "20260813", output_dir=Path(tmp))
+            self.assertTrue((Path(tmp) / "cpr_full_20260813.csv").exists())
+            self.assertEqual(result.date, "20260813")
+            self.assertFalse(result.top20.empty)
+
+
+if __name__ == "__main__":
+    unittest.main()
