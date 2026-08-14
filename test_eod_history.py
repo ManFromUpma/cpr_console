@@ -142,9 +142,11 @@ class TestHigherTimeframe(unittest.TestCase):
         self.assertEqual(last["HIGH"], 130)
         self.assertEqual(last["LOW"], 100)
         self.assertEqual(last["CLOSE"], 128)
+        self.assertIn("Industry", weekly.columns)
         frame, label = build_htf_frame(hist, "20260814", "W-FRI", min_history=2)
         self.assertFalse(frame.empty)
         self.assertIn("17 Aug", label)
+        self.assertIn("Industry", frame.columns)
         self.assertIn(frame.iloc[0]["Overlay"], {"Higher", "Lower", "Inside", "Outside", "Overlapping"})
 
 

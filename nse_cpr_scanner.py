@@ -568,7 +568,10 @@ def aggregate_htf_bars(history_df: pd.DataFrame, freq: str) -> pd.DataFrame:
     grouped = df.sort_values(["SYMBOL", "dt"]).groupby(["SYMBOL", "period_end"], sort=True)
     out = grouped.agg(agg).reset_index()
     out["session"] = out["period_end"]
-    return compute_cpr(out)
+    out = compute_cpr(out)
+    if "Industry" not in out.columns:
+        out = attach_industry(out, fetch=False)
+    return out
 
 
 def build_htf_frame(
