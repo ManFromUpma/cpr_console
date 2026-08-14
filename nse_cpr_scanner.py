@@ -350,6 +350,87 @@ def load_history_panel(dates: List[str], output_dir: Optional[Path] = None) -> p
     return pd.concat(frames, ignore_index=True)
 
 
+def scan_from_cached_bhavcopy(
+    date: str,
+    output_dir: Optional[Path] = None,
+    lookback: int = HISTORY_LOOKBACK,
+    write_csv: bool = True,
+) -> ScanResult:
+    """Build a session scan from a cached cash bhavcopy (no NSE download)."""
+    path = bhavcopy_cache_dir(output_dir) / f"cm_{date}.csv"
+    if not path.exists():
+        raise FileNotFoundError(f"Missing cached bhavcopy {path}")
+    cash_df = pd.read_csv(path)
+    cash_df = keep_listed_equity(cash_df, quiet=True)
+    if cash_df.empty:
+        raise RuntimeError(f"Cached bhavcopy {date} has no listed equity rows")
+    cash_df = attach_industry(cash_df, fetch=False)
+    if "Segment" not in cash_df.columns:
+        cash_df["Segment"] = "Cash Only"
+    cash_df = compute_cpr(cash_df)
+    cash_df = apply_bullish_cpr_filters(cash_df)
+    hist_dates = cached_history_dates(date, output_dir, lookback)
+    if hist_dates:
+        cash_df = attach_history_features(cash_df, load_history_panel(hist_dates, output_dir))
+    if write_csv:
+        return export_results(cash_df, date, output_dir=output_dir, verbose=False)
+    full_table, narrow, bullish, bearish, top20 = split_shortlists(cash_df)
+    return ScanResult(
+        date=date,
+        cash_rows=len(cash_df),
+        fo_available=False,
+        full=full_table,
+        narrow=narrow,
+        bullish=bullish,
+        bearish=bearish,
+        top20=top20,
+        output_dir=Path(output_dir) if output_dir is not None else OUTPUT_DIR,
+    )
+
+
+def backfill_cached_scans(
+    end_date: str,
+    output_dir: Optional[Path] = None,
+    lookback: int = HISTORY_LOOKBACK,
+    skip_existing: bool = True,
+) -> List[str]:
+    """Write cpr_full_*.csv for each cached cash session so the site archive has those dates."""
+    output_dir = Path(output_dir) if output_dir is not None else OUTPUT_DIR
+    dates = cached_history_dates(end_date, output_dir, lookback)
+    if not dates:
+        print("Archive: no cached bhavcopies")
+        return []
+    print(f"Archive: loading {len(dates)} cached sessions…")
+    panel = load_history_panel(dates, output_dir)
+    industry = load_industry_map(fetch=False)
+    written: List[str] = []
+    for date in dates:
+        full_path = output_dir / f"cpr_full_{date}.csv"
+        if full_path.exists():
+            header = set(pd.read_csv(full_path, nrows=0).columns)
+            if skip_existing and "Setup" in header and "Overlay" in header:
+                continue
+            print(f"  enrich {date} with overlay / own-narrow")
+            result = load_scan_result(date, output_dir)
+            export_results(result.full, date, output_dir=output_dir, verbose=False)
+            written.append(date)
+            continue
+        day = panel[panel["session"] == date].copy()
+        if day.empty:
+            continue
+        print(f"  archive scan {date}")
+        if "Segment" not in day.columns:
+            day["Segment"] = "Cash Only"
+        day = attach_industry(day, mapping=industry, fetch=False)
+        day = apply_bullish_cpr_filters(day)
+        hist = panel.loc[panel["session"] <= date]
+        day = attach_history_features(day, hist)
+        export_results(day, date, output_dir=output_dir, verbose=False)
+        written.append(date)
+    print(f"Archive: {len(dates)} cached sessions, {len(written)} scans written")
+    return dates
+
+
 def attach_history_features(
     scan_df: pd.DataFrame,
     history_df: pd.DataFrame,
@@ -598,7 +679,7 @@ def load_scan_result(date: str, output_dir: Optional[Path] = None) -> ScanResult
             full[col] = full[col].astype(str).str.lower().isin(["true", "1", "yes"])
     if "Bullish_CPR" not in full.columns:
         full = apply_bullish_cpr_filters(full)
-    full = keep_listed_equity(full)
+    full = keep_listed_equity(full, quiet=True)
     full = attach_industry(full)
     if "Setup" in full.columns:
         full["Setup"] = full["Setup"].fillna("No setup").replace({"None": "No setup", "nan": "No setup"})
@@ -642,6 +723,9 @@ def split_shortlists(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, pd.D
             "SYMBOL",
             "Industry",
             "CLOSE",
+            "Pivot",
+            "BC",
+            "TC",
             "CPR_Width_Pct",
             "Width_Rank_Pct",
             "Overlay",
@@ -672,26 +756,28 @@ def split_shortlists(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, pd.D
     return full_table, narrow, bullish, bearish, top20
 
 
-def export_results(df: pd.DataFrame, date: str, output_dir: Optional[Path] = None) -> ScanResult:
+def export_results(
+    df: pd.DataFrame,
+    date: str,
+    output_dir: Optional[Path] = None,
+    verbose: bool = True,
+) -> ScanResult:
     """Export ranked tables and shortlists."""
     output_dir = Path(output_dir) if output_dir is not None else OUTPUT_DIR
     output_dir.mkdir(exist_ok=True)
     full_table, narrow, bullish, bearish, top20 = split_shortlists(df)
 
     full_table.to_csv(output_dir / f"cpr_full_{date}.csv", index=False)
-    print(f"✓ Full table: {output_dir / f'cpr_full_{date}.csv'}")
-
     narrow.to_csv(output_dir / f"cpr_narrow_{date}.csv", index=False)
-    print(f"✓ Narrow CPR: {len(narrow)} symbols → {output_dir / f'cpr_narrow_{date}.csv'}")
-
     bullish.to_csv(output_dir / f"cpr_bullish_{date}.csv", index=False)
-    print(f"✓ Bullish CPR: {len(bullish)} symbols → {output_dir / f'cpr_bullish_{date}.csv'}")
-
     bearish.to_csv(output_dir / f"cpr_bearish_{date}.csv", index=False)
-    print(f"✓ Bearish CPR: {len(bearish)} symbols → {output_dir / f'cpr_bearish_{date}.csv'}")
-
     top20.to_csv(output_dir / f"cpr_top20_narrow_{date}.csv", index=False)
-    print(f"✓ Top 20 Narrow: {output_dir / f'cpr_top20_narrow_{date}.csv'}")
+    if verbose:
+        print(f"✓ Full table: {output_dir / f'cpr_full_{date}.csv'}")
+        print(f"✓ Narrow CPR: {len(narrow)} symbols → {output_dir / f'cpr_narrow_{date}.csv'}")
+        print(f"✓ Bullish CPR: {len(bullish)} symbols → {output_dir / f'cpr_bullish_{date}.csv'}")
+        print(f"✓ Bearish CPR: {len(bearish)} symbols → {output_dir / f'cpr_bearish_{date}.csv'}")
+        print(f"✓ Top 20 Narrow: {output_dir / f'cpr_top20_narrow_{date}.csv'}")
 
     return ScanResult(
         date=date,
@@ -746,7 +832,10 @@ def scan_eod_cpr(
             print(f"History features: Own_Narrow {own_n} | Setups {setups}")
 
         if write_csv:
-            return export_results(cash_df, date, output_dir=output_dir)
+            result = export_results(cash_df, date, output_dir=output_dir)
+            if lookback and lookback > 0:
+                backfill_cached_scans(date, output_dir=output_dir, lookback=lookback, skip_existing=True)
+            return result
 
         full_table, narrow, bullish, bearish, top20 = split_shortlists(cash_df)
         return ScanResult(
@@ -768,10 +857,10 @@ def main(argv: Optional[List[str]] = None) -> None:
     argv = list(sys.argv[1:] if argv is None else argv)
     if not argv or argv[0] in ("-h", "--help"):
         print("Usage: python nse_cpr_scanner.py YYYYMMDD [--lookback 60]")
+        print("       python nse_cpr_scanner.py --backfill YYYYMMDD")
         print("Example: python nse_cpr_scanner.py 20260813")
         sys.exit(0 if argv and argv[0] in ("-h", "--help") else 1)
 
-    date = argv[0]
     lookback = HISTORY_LOOKBACK
     if "--lookback" in argv:
         idx = argv.index("--lookback")
@@ -781,6 +870,19 @@ def main(argv: Optional[List[str]] = None) -> None:
             print("--lookback needs an integer, e.g. --lookback 60")
             sys.exit(1)
 
+    if argv[0] == "--backfill":
+        date = argv[1] if len(argv) > 1 and argv[1] != "--lookback" else last_completed_session()
+        try:
+            datetime.strptime(date, "%Y%m%d")
+        except ValueError:
+            print("Date must be YYYYMMDD, e.g. 20260813")
+            sys.exit(1)
+        print(f"=== Backfill archive scans through {date} ===\n")
+        dates = backfill_cached_scans(date, lookback=lookback, skip_existing=True)
+        print(f"Sessions available: {len(dates)}")
+        return
+
+    date = argv[0]
     print(f"=== NSE EOD CPR Scanner for {date} ===\n")
     try:
         datetime.strptime(date, "%Y%m%d")

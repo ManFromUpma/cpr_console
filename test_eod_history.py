@@ -85,6 +85,9 @@ class TestHistoryFeatures(unittest.TestCase):
                 "Segment": "F&O + Cash",
                 "Overlay": "Higher",
                 "Industry": "Banks",
+                "Pivot": 100.1,
+                "BC": 100.0,
+                "TC": 100.2,
             },
             {
                 "SYMBOL": "THIN",
@@ -102,10 +105,15 @@ class TestHistoryFeatures(unittest.TestCase):
                 "Segment": "Cash Only",
                 "Overlay": "Higher",
                 "Industry": "Unclassified",
+                "Pivot": 12.0,
+                "BC": 12.0,
+                "TC": 12.0,
             },
         ]
         _, _, _, _, top20 = split_shortlists(pd.DataFrame(rows))
         self.assertEqual(list(top20["SYMBOL"]), ["LIQUID"])
+        for col in ("Pivot", "BC", "TC"):
+            self.assertIn(col, top20.columns)
 
 
 if __name__ == "__main__":

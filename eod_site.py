@@ -49,6 +49,9 @@ TABLE_COLS = [
     "SYMBOL",
     "Industry",
     "CLOSE",
+    "Pivot",
+    "BC",
+    "TC",
     "CPR_Width_Pct",
     "Width_Rank_Pct",
     "CPR_Class",
@@ -58,9 +61,6 @@ TABLE_COLS = [
     "Bias",
     "Price_Position",
     "Segment",
-    "Pivot",
-    "BC",
-    "TC",
 ]
 
 
@@ -72,9 +72,10 @@ def _records(df: pd.DataFrame) -> list:
     frame = web_frame(df)
     cols = [c for c in TABLE_COLS if c in frame.columns]
     out = []
-    for row in frame.loc[:, cols].itertuples(index=False):
+    for rec_in in frame.loc[:, cols].to_dict(orient="records"):
         rec = {}
-        for col, val in zip(cols, row):
+        for col in cols:
+            val = rec_in.get(col)
             if pd.isna(val):
                 rec[col] = None
             elif col in ROUND_2:
@@ -186,7 +187,7 @@ def _page_html(payload: dict, asset_prefix: str) -> str:
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <title>EOD CPR · {html.escape(payload["label"])}</title>
   <base href="{asset_prefix}">
-  <link rel="stylesheet" href="assets/style.css?v=3"/>
+  <link rel="stylesheet" href="assets/style.css?v=4"/>
 </head>
 <body>
   <header class="top">
@@ -215,12 +216,16 @@ def _page_html(payload: dict, asset_prefix: str) -> str:
     <label class="filter-label">Industry
       <select id="industry">{industry_opts}</select>
     </label>
-    <select id="klass"><option value="Any">Any class</option><option>Narrow</option><option>Moderate</option><option>Wide</option></select>
+    <select id="klass"><option value="Any">Any CPR class</option><option>Narrow</option><option>Moderate</option><option>Wide</option></select>
     <select id="bias"><option value="Any">Any bias</option><option>Bullish</option><option>Bearish</option><option>Neutral</option></select>
     <select id="overlay"><option value="Any">Any overlay</option><option>Higher</option><option>Lower</option><option>Inside</option><option>Outside</option><option>Overlapping</option></select>
     <select id="setup"><option value="Any">Any setup</option><option>Long</option><option>Short</option><option>Watch</option><option>No setup</option></select>
     <select id="ownNarrow"><option value="Any">Own-narrow: any</option><option value="Yes">Own-narrow</option><option value="No">Not own-narrow</option></select>
   </section>
+  <p class="count" style="padding-top:0">
+    CPR class is the band as % of close: Narrow ≤ 0.25%, Moderate 0.25–0.75%, Wide &gt; 0.75%.
+    Own-narrow is that stock versus its own last 60 sessions. Pivot / BC / TC are tomorrow’s CPR levels.
+  </p>
 
   <nav class="tabs" id="tabs">
     <button data-tab="full" class="on">Full</button>
@@ -247,7 +252,7 @@ def _page_html(payload: dict, asset_prefix: str) -> str:
     Top 20 ranks liquid setups (VALUE ≥ ₹2 cr) by width percentile.
   </footer>
   <script>window.CPR_DATA = {data};</script>
-  <script src="assets/app.js?v=3"></script>
+  <script src="assets/app.js?v=4"></script>
 </body>
 </html>
 """
@@ -304,7 +309,7 @@ footer { padding: 12px 24px 32px; color: var(--muted); font-size: 12px; border-t
 
 JS = r"""
 const DATA = window.CPR_DATA;
-const COLS = ["SYMBOL","Industry","CLOSE","CPR_Width_Pct","Width_Rank_Pct","CPR_Class","Own_Narrow","Overlay","Setup","Bias","Price_Position","Segment","Pivot","BC","TC"];
+const COLS = ["SYMBOL","Industry","CLOSE","Pivot","BC","TC","CPR_Width_Pct","Width_Rank_Pct","CPR_Class","Own_Narrow","Overlay","Setup","Bias","Price_Position","Segment"];
 let tab = "full";
 
 function $(id) { return document.getElementById(id); }
