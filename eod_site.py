@@ -159,15 +159,25 @@ def _payload(result: ScanResult, downloads: dict, dates: Iterable[str], home_hre
     }
 
 
+def _industry_options(payload: dict) -> str:
+    parts = ['<option value="Any">Any industry</option>']
+    for name in payload.get("industries") or []:
+        safe = html.escape(str(name), quote=True)
+        parts.append(f'<option value="{safe}">{safe}</option>')
+    return "\n      ".join(parts)
+
+
 def _page_html(payload: dict, asset_prefix: str) -> str:
     data = json.dumps(payload, separators=(",", ":"), ensure_ascii=True)
+    industry_opts = _industry_options(payload)
     return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <title>EOD CPR · {html.escape(payload["label"])}</title>
-  <link rel="stylesheet" href="{asset_prefix}assets/style.css"/>
+  <base href="{asset_prefix}">
+  <link rel="stylesheet" href="assets/style.css?v=2"/>
 </head>
 <body>
   <header class="top">
@@ -193,7 +203,9 @@ def _page_html(payload: dict, asset_prefix: str) -> str:
   <section class="toolbar">
     <input id="search" type="search" placeholder="Search symbol…" autocomplete="off"/>
     <select id="segment"><option value="Any">Any segment</option><option>F&amp;O + Cash</option><option>Cash Only</option></select>
-    <select id="industry"><option value="Any">Any industry</option></select>
+    <label class="filter-label">Industry
+      <select id="industry">{industry_opts}</select>
+    </label>
     <select id="klass"><option value="Any">Any class</option><option>Narrow</option><option>Moderate</option><option>Wide</option></select>
     <select id="bias"><option value="Any">Any bias</option><option>Bullish</option><option>Bearish</option><option>Neutral</option></select>
   </section>
@@ -221,7 +233,7 @@ def _page_html(payload: dict, asset_prefix: str) -> str:
     Bullish CPR = close above CPR + Pivot &gt; BC + narrow.
   </footer>
   <script>window.CPR_DATA = {data};</script>
-  <script src="{asset_prefix}assets/app.js"></script>
+  <script src="assets/app.js?v=2"></script>
 </body>
 </html>
 """
@@ -244,7 +256,8 @@ html, body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.
 .top { display: flex; justify-content: space-between; align-items: end; gap: 16px; padding: 28px 24px 12px; border-bottom: 1px solid var(--line); }
 .kicker { margin: 0; color: var(--accent); letter-spacing: .12em; text-transform: uppercase; font-size: 11px; }
 h1 { margin: 4px 0 0; font-size: 28px; font-weight: 650; }
-.date-nav { color: var(--muted); font-size: 12px; display: flex; flex-direction: column; gap: 6px; }
+.date-nav, .filter-label { color: var(--muted); font-size: 12px; display: flex; flex-direction: column; gap: 6px; }
+#industry { min-width: 220px; }
 select, input { background: var(--card); color: var(--text); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; }
 .banner { margin: 16px 24px; padding: 12px 14px; background: #18202a; border: 1px solid var(--line); border-radius: 10px; color: var(--muted); font-size: 13px; }
 .metrics { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 10px; padding: 0 24px 16px; }
@@ -284,6 +297,7 @@ function $(id) { return document.getElementById(id); }
 
 function fillIndustry() {
   const sel = $("industry");
+  if (!sel || sel.options.length > 1) return;
   (DATA.industries || []).forEach(name => {
     const opt = document.createElement("option");
     opt.value = name;

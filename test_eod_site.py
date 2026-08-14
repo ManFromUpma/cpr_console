@@ -67,6 +67,7 @@ class TestSiteBuild(unittest.TestCase):
             self.assertIn("window.CPR_DATA", html)
             self.assertIn("cpr_20260813.zip", html)
             self.assertIn("id=\"industry\"", html)
+            self.assertIn("Unclassified", html)
 
 
 if __name__ == "__main__":
