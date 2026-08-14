@@ -27,6 +27,7 @@ from nse_cpr_scanner import (
     IST,
     ScanResult,
     WEB_EXPORT_COLS,
+    attach_htf_to_result,
     discover_scan_dates,
     load_scan_result,
     web_frame,
@@ -61,6 +62,7 @@ TABLE_COLS = [
     "Bias",
     "Price_Position",
     "Segment",
+    "Applies",
 ]
 
 
@@ -100,6 +102,8 @@ def _write_downloads(result: ScanResult, dest: Path) -> dict:
         "bullish": ("cpr_bullish.csv", result.bullish),
         "bearish": ("cpr_bearish.csv", result.bearish),
         "top20": ("cpr_top20_narrow.csv", result.top20),
+        "weekly": ("cpr_weekly.csv", result.weekly),
+        "monthly": ("cpr_monthly.csv", result.monthly),
     }
     files = []
     for key, (name, frame) in mapping.items():
@@ -115,6 +119,8 @@ def _write_downloads(result: ScanResult, dest: Path) -> dict:
             [
                 f"NSE EOD CPR scan — session {result.date} ({_date_label(result.date)})",
                 "CPR from that session's H/L/C applies to the next session.",
+                "Weekly CPR applies to the next week after the last completed Friday week.",
+                "Monthly CPR applies to the next month after the last completed calendar month.",
                 "Research / educational use. Not investment advice.",
                 "OHLC sourced from NSE UDI bhavcopy. Not an NSE product.",
                 "",
@@ -133,6 +139,8 @@ def _write_downloads(result: ScanResult, dest: Path) -> dict:
         "bullish": "downloads/cpr_bullish.csv",
         "bearish": "downloads/cpr_bearish.csv",
         "top20": "downloads/cpr_top20_narrow.csv",
+        "weekly": "downloads/cpr_weekly.csv",
+        "monthly": "downloads/cpr_monthly.csv",
         "zip": f"downloads/{zip_name}",
     }
 
@@ -144,12 +152,20 @@ def _payload(result: ScanResult, downloads: dict, dates: Iterable[str], home_hre
         industries = sorted(result.full["Industry"].dropna().astype(str).unique().tolist())
     own_n = int(result.full["Own_Narrow"].sum()) if "Own_Narrow" in result.full.columns else 0
     setups = int(result.full["Setup"].isin(["Long", "Short", "Watch"]).sum()) if "Setup" in result.full.columns else 0
+    w_setups = int(result.weekly["Setup"].isin(["Long", "Short", "Watch"]).sum()) if not result.weekly.empty and "Setup" in result.weekly.columns else 0
+    m_setups = int(result.monthly["Setup"].isin(["Long", "Short", "Watch"]).sum()) if not result.monthly.empty and "Setup" in result.monthly.columns else 0
     return {
         "date": result.date,
         "label": _date_label(result.date),
         "home": home_href,
         "dates": [{"id": d, "label": _date_label(d)} for d in dates],
         "industries": industries,
+        "htf": {
+            "weekly_applies": result.weekly_applies or "",
+            "monthly_applies": result.monthly_applies or "",
+            "weekly_setups": w_setups,
+            "monthly_setups": m_setups,
+        },
         "metrics": {
             "symbols": int(result.cash_rows),
             "narrow": int(len(result.narrow)),
@@ -165,6 +181,8 @@ def _payload(result: ScanResult, downloads: dict, dates: Iterable[str], home_hre
             "bullish": _records(result.bullish),
             "bearish": _records(result.bearish),
             "top20": _records(result.top20),
+            "weekly": _records(result.weekly) if not result.weekly.empty else [],
+            "monthly": _records(result.monthly) if not result.monthly.empty else [],
         },
     }
 
@@ -187,7 +205,7 @@ def _page_html(payload: dict, asset_prefix: str) -> str:
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <title>EOD CPR · {html.escape(payload["label"])}</title>
   <base href="{asset_prefix}">
-  <link rel="stylesheet" href="assets/style.css?v=4"/>
+  <link rel="stylesheet" href="assets/style.css?v=5"/>
 </head>
 <body>
   <header class="top">
@@ -201,8 +219,9 @@ def _page_html(payload: dict, asset_prefix: str) -> str:
   </header>
 
   <section class="banner">
-    Research only. Not investment advice. Levels are from NSE bhavcopy H/L/C for
-    <strong>{html.escape(payload["label"])}</strong> and apply to the <strong>next</strong> session.
+    Research only. Not investment advice. Daily levels apply to the <strong>next</strong> session.
+    Weekly CPR applies to <strong>the next week</strong>. Monthly CPR applies to <strong>the next month</strong>
+    after the last completed month — not the rest of the current month unless that month is finished.
     Not an NSE product.
   </section>
 
@@ -224,7 +243,8 @@ def _page_html(payload: dict, asset_prefix: str) -> str:
   </section>
   <p class="count" style="padding-top:0">
     CPR class is the band as % of close: Narrow ≤ 0.25%, Moderate 0.25–0.75%, Wide &gt; 0.75%.
-    Own-narrow is that stock versus its own last 60 sessions. Pivot / BC / TC are tomorrow’s CPR levels.
+    Own-narrow is that stock versus its own history (60 days, ~12 weeks, or completed months).
+    Daily Pivot / BC / TC are tomorrow’s levels. Use the Weekly / Monthly tabs to hold longer.
   </p>
 
   <nav class="tabs" id="tabs">
@@ -233,6 +253,8 @@ def _page_html(payload: dict, asset_prefix: str) -> str:
     <button data-tab="bullish">Bullish</button>
     <button data-tab="bearish">Bearish</button>
     <button data-tab="top20">Top 20</button>
+    <button data-tab="weekly">Weekly</button>
+    <button data-tab="monthly">Monthly</button>
   </nav>
 
   <p class="count" id="count"></p>
@@ -245,14 +267,15 @@ def _page_html(payload: dict, asset_prefix: str) -> str:
 
   <footer>
     Equity stocks only (ETFs, AMCs, mutual funds excluded). Industry from Nifty 500.
-    Built from NSE UDI cash + F&amp;O bhavcopy plus ~60 prior cash sessions.
+    Built from NSE UDI cash + F&amp;O bhavcopy plus ~252 prior cash sessions.
     CPR = Pivot (H+L+C)/3, BC (H+L)/2, TC 2P−BC.
     Absolute Narrow ≤ 0.25%. Own_Narrow = bottom 25% of that name’s last 60 widths.
     Overlay = today’s CPR vs prior session. Setup = Own_Narrow + side + overlay.
+    Weekly / Monthly tabs use the same formulas on completed week and month bars.
     Top 20 ranks liquid setups (VALUE ≥ ₹2 cr) by width percentile.
   </footer>
   <script>window.CPR_DATA = {data};</script>
-  <script src="assets/app.js?v=4"></script>
+  <script src="assets/app.js?v=5"></script>
 </body>
 </html>
 """
@@ -309,7 +332,7 @@ footer { padding: 12px 24px 32px; color: var(--muted); font-size: 12px; border-t
 
 JS = r"""
 const DATA = window.CPR_DATA;
-const COLS = ["SYMBOL","Industry","CLOSE","Pivot","BC","TC","CPR_Width_Pct","Width_Rank_Pct","CPR_Class","Own_Narrow","Overlay","Setup","Bias","Price_Position","Segment"];
+const COLS = ["SYMBOL","Industry","CLOSE","Pivot","BC","TC","CPR_Width_Pct","Width_Rank_Pct","CPR_Class","Own_Narrow","Overlay","Setup","Bias","Price_Position","Segment","Applies"];
 let tab = "full";
 
 function $(id) { return document.getElementById(id); }
@@ -367,8 +390,10 @@ function downloads() {
     ["Bullish", d.bullish],
     ["Bearish", d.bearish],
     ["Top 20", d.top20],
+    ["Weekly", d.weekly],
+    ["Monthly", d.monthly],
     ["All ZIP", d.zip],
-  ].map(([label, href], i) => `<a class="${i===5?"zip":""}" href="${href}" download>${label}</a>`).join("");
+  ].map(([label, href], i) => href ? `<a class="${label==="All ZIP"?"zip":""}" href="${href}" download>${label}</a>` : "").join("");
 }
 
 function fmt(col, val) {
@@ -420,7 +445,11 @@ function rows() {
 
 function render() {
   const data = rows();
-  $("count").textContent = `${data.length} rows`;
+  const htf = DATA.htf || {};
+  let extra = "";
+  if (tab === "weekly" && htf.weekly_applies) extra = ` · applies to ${htf.weekly_applies}`;
+  if (tab === "monthly" && htf.monthly_applies) extra = ` · applies to ${htf.monthly_applies}`;
+  $("count").textContent = `${data.length} rows${extra}`;
   $("head").innerHTML = "<tr>" + COLS.map(c => `<th>${c.replaceAll("_"," ")}</th>`).join("") + "</tr>";
   $("body").innerHTML = data.map(r =>
     "<tr>" + COLS.map(c => `<td class="${klass(c, r[c])}">${fmt(c, r[c])}</td>`).join("") + "</tr>"
@@ -476,6 +505,8 @@ def build_site(output_dir: Path = Path("cpr_output"), site_dir: Path = SITE_DIR)
     latest = dates[0]
     for date in dates:
         result = load_scan_result(date, output_dir=output_dir)
+        if date == latest and result.weekly.empty:
+            result = attach_htf_to_result(result, output_dir=output_dir, write_csv=True)
         if date == latest:
             _write_page(result, site_dir, dates, home_href="./", asset_prefix="./")
         archive_dir = site_dir / "archive" / date

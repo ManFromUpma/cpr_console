@@ -116,5 +116,61 @@ class TestHistoryFeatures(unittest.TestCase):
             self.assertIn(col, top20.columns)
 
 
+class TestHigherTimeframe(unittest.TestCase):
+    def test_friday_completes_the_week(self):
+        from nse_cpr_scanner import last_complete_period_end, htf_applies_label
+
+        self.assertEqual(last_complete_period_end("20260814", "W-FRI"), "20260814")
+        self.assertEqual(last_complete_period_end("20260812", "W-FRI"), "20260807")
+        self.assertEqual(last_complete_period_end("20260814", "M"), "20260731")
+        self.assertIn("17 Aug", htf_applies_label("20260814", "W-FRI"))
+        self.assertEqual(htf_applies_label("20260731", "M"), "Aug 2026")
+
+    def test_weekly_bar_uses_week_high_low_close(self):
+        from nse_cpr_scanner import aggregate_htf_bars, build_htf_frame
+
+        rows = []
+        # Week ending 7 Aug: high 120, low 80, close 110 on Friday
+        rows.append(_bar("AAA", "20260803", 100, 90, 95))
+        rows.append(_bar("AAA", "20260807", 120, 80, 110))
+        # Week ending 14 Aug: high 130, low 100, close 128 on Friday
+        rows.append(_bar("AAA", "20260810", 110, 100, 105))
+        rows.append(_bar("AAA", "20260814", 130, 105, 128))
+        hist = pd.DataFrame(rows)
+        weekly = aggregate_htf_bars(hist, "W-FRI")
+        last = weekly[weekly["session"] == "20260814"].iloc[0]
+        self.assertEqual(last["HIGH"], 130)
+        self.assertEqual(last["LOW"], 100)
+        self.assertEqual(last["CLOSE"], 128)
+        frame, label = build_htf_frame(hist, "20260814", "W-FRI", min_history=2)
+        self.assertFalse(frame.empty)
+        self.assertIn("17 Aug", label)
+        self.assertIn(frame.iloc[0]["Overlay"], {"Higher", "Lower", "Inside", "Outside", "Overlapping"})
+
+
+class TestDailyOwnWindow(unittest.TestCase):
+    def test_own_window_limits_ranking_to_recent_sessions(self):
+        # 10 tight old sessions, 8 loose, 1 mid, then a 0.6-wide final close above band.
+        # With own_window=10 the final is near-tightest (pct≈0.1). With the full
+        # history the 10 tight old sessions push its rank above the quartile.
+        hist_rows = []
+        base = pd.Timestamp("2026-01-05")
+        for i, (span, n) in enumerate([(0.4, 10), (2.0, 8), (1.0, 1)]):
+            for j in range(n):
+                d = (base + pd.Timedelta(days=len(hist_rows) + 1)).strftime("%Y%m%d")
+                hist_rows.append(_bar("WWW", d, 100 + span / 2, 100 - span / 2, 100 + span / 2))
+        final_d = (base + pd.Timedelta(days=len(hist_rows) + 1)).strftime("%Y%m%d")
+        hist_rows.append(_bar("WWW", final_d, 100.3, 99.7, 100.3))
+        hist = compute_cpr(pd.DataFrame(hist_rows))
+        scan = apply_bullish_cpr_filters(hist[hist["session"] == final_d].copy())
+        out = attach_history_features(scan, hist, own_window=10)
+        self.assertTrue(bool(out.iloc[0]["Own_Narrow"]))
+        self.assertLessEqual(int(out.iloc[0]["History_Days"]), 10)
+        self.assertLessEqual(float(out.iloc[0]["Width_Rank_Pct"]), 0.25)
+        out_all = attach_history_features(scan, hist)
+        self.assertGreater(float(out_all.iloc[0]["Width_Rank_Pct"]), 0.25)
+        self.assertFalse(bool(out_all.iloc[0]["Own_Narrow"]))
+
+
 if __name__ == "__main__":
     unittest.main()

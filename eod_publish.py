@@ -21,14 +21,14 @@ from pathlib import Path
 from eod_site import build_site
 from nse_cpr_scanner import (
     OUTPUT_DIR,
-    HISTORY_LOOKBACK,
+    HISTORY_LOOKBACK_HTF,
     candidate_session_dates,
     discover_scan_dates,
     scan_eod_cpr,
 )
 
 
-def scan_latest(date: str | None, output_dir: Path, lookback: int = HISTORY_LOOKBACK) -> str:
+def scan_latest(date: str | None, output_dir: Path, lookback: int = HISTORY_LOOKBACK_HTF) -> str:
     dates = [date] if date else candidate_session_dates()
     last_error = None
     for candidate in dates:
@@ -52,8 +52,8 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument(
         "--lookback",
         type=int,
-        default=HISTORY_LOOKBACK,
-        help="Prior cash sessions to cache for overlay / own-narrow (default 60)",
+        default=HISTORY_LOOKBACK_HTF,
+        help="Prior cash sessions to cache for overlay / own-narrow / HTF bars (default 252)",
     )
     args = parser.parse_args(argv)
 

@@ -16,7 +16,7 @@ import pandas as pd
 import pytz
 import streamlit as st
 
-from nse_cpr_scanner import DISPLAY_COLS, HISTORY_LOOKBACK, scan_eod_cpr
+from nse_cpr_scanner import DISPLAY_COLS, HISTORY_LOOKBACK_HTF, scan_eod_cpr
 
 IST = pytz.timezone("Asia/Kolkata")
 
@@ -144,9 +144,9 @@ with st.sidebar:
     lookback = st.number_input(
         "History lookback (sessions)",
         min_value=0,
-        max_value=120,
-        value=HISTORY_LOOKBACK,
-        help="Cash bhavcopies cached under cpr_output/bhavcopy for overlay and own-width rank.",
+        max_value=300,
+        value=HISTORY_LOOKBACK_HTF,
+        help="Cash bhavcopies cached under cpr_output/bhavcopy for overlay, own-width rank and weekly/monthly bars.",
     )
 
     segment_filter = st.selectbox("Segment", ["Any", "F&O + Cash", "Cash Only"], index=0)
@@ -173,12 +173,11 @@ with st.sidebar:
 
     st.caption("Absolute Narrow ≤ 0.25% · Own_Narrow = bottom 25% of that name’s last 60 sessions")
 
-
 st.title("📥 NSE EOD CPR Scanner")
 st.markdown(
     """
 **Separate from the Shah CPR console (port 8501) and the breakout screener (port 8502).**
-Downloads NSE **cash + F&O bhavcopies**, caches ~60 prior cash sessions,
+Downloads NSE **cash + F&O bhavcopies**, caches ~252 prior cash sessions,
 computes CPR from that session's H/L/C, ranks width vs each name's own history,
 and tags overlay / Setup for the **next** session. *Research only. Not investment advice.*
 """
@@ -239,8 +238,8 @@ def apply_filters(df: pd.DataFrame) -> pd.DataFrame:
     return view.reset_index(drop=True)
 
 
-tab_full, tab_narrow, tab_bull, tab_bear, tab_top, tab_rules = st.tabs(
-    ["Full table", "Narrow", "Bullish CPR", "Bearish CPR", "Top 20 narrow", "Rules"]
+tab_full, tab_narrow, tab_bull, tab_bear, tab_top, tab_week, tab_month, tab_rules = st.tabs(
+    ["Full table", "Narrow", "Bullish CPR", "Bearish CPR", "Top 20 narrow", "Weekly CPR", "Monthly CPR", "Rules"]
 )
 
 with tab_full:
@@ -317,6 +316,42 @@ with tab_top:
             use_container_width=True,
         )
 
+with tab_week:
+    st.caption(
+        f"Weekly CPR from the last completed week (Fri week). Applies to {result.weekly_applies or 'the next week'}. "
+        "Hold the week, not the day. Own_Narrow vs ~52 weekly bars from the 252-day cache."
+    )
+    if result.weekly.empty:
+        st.info("No weekly CPR yet. Scan with history lookback so bhavcopies can be rolled into weeks.")
+    else:
+        view = apply_filters(result.weekly)
+        st.dataframe(style_table(format_view(view)), use_container_width=True, height=480)
+        st.download_button(
+            "Download weekly (CSV)",
+            data=csv_bytes(view),
+            file_name=f"cpr_weekly_{result.date}.csv",
+            mime="text/csv",
+            use_container_width=True,
+        )
+
+with tab_month:
+    st.caption(
+        f"Monthly CPR from the last completed calendar month. Applies to {result.monthly_applies or 'the next month'}. "
+        "If this month is not finished, you are still on last month’s map. Own_Narrow needs several months of cache."
+    )
+    if result.monthly.empty:
+        st.info("No monthly CPR yet. Scan with history lookback.")
+    else:
+        view = apply_filters(result.monthly)
+        st.dataframe(style_table(format_view(view)), use_container_width=True, height=480)
+        st.download_button(
+            "Download monthly (CSV)",
+            data=csv_bytes(view),
+            file_name=f"cpr_monthly_{result.date}.csv",
+            mime="text/csv",
+            use_container_width=True,
+        )
+
 with tab_rules:
     st.markdown(
         """
@@ -333,13 +368,15 @@ This app on **port 8503** is a **third screener**:
    `P = (H+L+C)/3`, `BC = (H+L)/2`, `TC = 2P − BC`
 5. Width % = `(CPR Top − CPR Bottom) / Close × 100`
 6. **Narrow** ≤ 0.25% · **Moderate** 0.25–0.75% · **Wide** > 0.75% (absolute labels)
-7. **Own_Narrow**: this name’s width is in the bottom 25% of its last ~60 sessions
+7. **Own_Narrow**: this name’s width is in the bottom 25% of its last ~60 sessions (daily)
 8. **Overlay**: today’s CPR vs the prior session — Higher / Lower / Inside / Outside / Overlapping
 9. **Setup**: Long = Own_Narrow + Above CPR + Higher overlay; Short = Own_Narrow + Below + Lower; Watch = Own_Narrow + Inside
 10. **Bullish CPR** (legacy): close above CPR + Pivot > BC + width < 0.25%
 11. **Bearish CPR** (legacy): close below CPR + Pivot < BC
 12. Tag each cash symbol **F&O + Cash** if it appears in the F&O bhavcopy
 13. Top 20 ranks Setup names with VALUE ≥ ₹2 cr by width percentile, not raw Width %
+14. **Weekly CPR**: same formulas on the last completed Mon–Fri week, from the ~252-day bhavcopy cache (~52 weekly bars). Applies to the **next** week. Hold days, not 15:15 flatten.
+15. **Monthly CPR**: same formulas on the last completed calendar month, from the ~252-day bhavcopy cache (~12 monthly bars). Applies to the **next** month. If August is not over, you are still using July’s monthly box.
 
 **Not the same as the live console.** This is EOD, exchange bhavcopy, no Yahoo, no virgin-CPR live quotes.
 """

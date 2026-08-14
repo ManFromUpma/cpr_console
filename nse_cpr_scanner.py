@@ -6,7 +6,8 @@ Separate from the Shah CPR console (`cpr_engine.py` / `app.py`) and the
 intraday breakout screener (`cpr_breakout_engine.py` / `breakout_app.py`).
 
 - Downloads NSE bhavcopy CSVs (cash + F&O)
-- Caches ~60 prior cash sessions for own-history width rank and overlay
+- Caches ~252 prior cash sessions (configurable via --lookback): ~60 for daily
+  own-history rank, the rest gives weekly / monthly CPR real depth
 - Computes CPR, Width %, classification, and Bullish/Bearish flags
 - Tags F&O vs Cash-only symbols
 - Exports ranked tables and shortlists
@@ -72,8 +73,11 @@ UNCLASSIFIED_INDUSTRY = "Unclassified"
 INDUSTRY_URL = "https://nsearchives.nseindia.com/content/indices/ind_nifty500list.csv"
 INDUSTRY_CACHE = Path(__file__).resolve().parent / "universes" / "nifty500_industry.csv"
 HISTORY_LOOKBACK = 60
+HISTORY_LOOKBACK_HTF = 252
 OWN_NARROW_QUANTILE = 0.25
 MIN_HISTORY_DAYS = 10
+MIN_HISTORY_WEEKS = 8
+MIN_HISTORY_MONTHS = 4
 MIN_VALUE_TOP20 = 20_000_000
 BHAVCOPY_SLIM_COLS = ["SYMBOL", "SERIES", "NAME", "OPEN", "HIGH", "LOW", "CLOSE", "VOLUME", "VALUE"]
 
@@ -96,6 +100,10 @@ class ScanResult:
     bearish: pd.DataFrame
     top20: pd.DataFrame
     output_dir: Path = field(default_factory=lambda: OUTPUT_DIR)
+    weekly: pd.DataFrame = field(default_factory=pd.DataFrame)
+    monthly: pd.DataFrame = field(default_factory=pd.DataFrame)
+    weekly_applies: str = ""
+    monthly_applies: str = ""
 
 
 def _nse_session() -> requests.Session:
@@ -254,8 +262,11 @@ def bhavcopy_cache_dir(output_dir: Optional[Path] = None) -> Path:
     return root / "bhavcopy"
 
 
-def session_date_window(end_date: str, sessions: int = HISTORY_LOOKBACK, calendar_pad: int = 40) -> List[str]:
-    """Newest-first weekday dates, padded so holidays can be skipped."""
+def session_date_window(end_date: str, sessions: int = HISTORY_LOOKBACK_HTF, calendar_pad: int = 130) -> List[str]:
+    """Newest-first weekday dates, padded so holidays can be skipped.
+
+    `calendar_pad` covers weekends + market holidays so the window yields at least
+    `sessions` trading dates (~250 sessions ≈ 12 months)."""
     end = datetime.strptime(end_date, "%Y%m%d").date()
     dates: List[str] = []
     cur = end
@@ -273,7 +284,7 @@ def _slim_bhavcopy(df: pd.DataFrame) -> pd.DataFrame:
 
 def ensure_bhavcopy_history(
     end_date: str,
-    lookback: int = HISTORY_LOOKBACK,
+    lookback: int = HISTORY_LOOKBACK_HTF,
     output_dir: Optional[Path] = None,
     session: Optional[requests.Session] = None,
 ) -> List[str]:
@@ -321,7 +332,7 @@ def seed_bhavcopy_cache(df: pd.DataFrame, date: str, output_dir: Optional[Path] 
     return path
 
 
-def cached_history_dates(end_date: str, output_dir: Optional[Path] = None, lookback: int = HISTORY_LOOKBACK) -> List[str]:
+def cached_history_dates(end_date: str, output_dir: Optional[Path] = None, lookback: int = HISTORY_LOOKBACK_HTF) -> List[str]:
     cache = bhavcopy_cache_dir(output_dir)
     got: List[str] = []
     for date in session_date_window(end_date, lookback):
@@ -353,7 +364,7 @@ def load_history_panel(dates: List[str], output_dir: Optional[Path] = None) -> p
 def scan_from_cached_bhavcopy(
     date: str,
     output_dir: Optional[Path] = None,
-    lookback: int = HISTORY_LOOKBACK,
+    lookback: int = HISTORY_LOOKBACK_HTF,
     write_csv: bool = True,
 ) -> ScanResult:
     """Build a session scan from a cached cash bhavcopy (no NSE download)."""
@@ -371,7 +382,9 @@ def scan_from_cached_bhavcopy(
     cash_df = apply_bullish_cpr_filters(cash_df)
     hist_dates = cached_history_dates(date, output_dir, lookback)
     if hist_dates:
-        cash_df = attach_history_features(cash_df, load_history_panel(hist_dates, output_dir))
+        cash_df = attach_history_features(
+            cash_df, load_history_panel(hist_dates, output_dir), own_window=HISTORY_LOOKBACK
+        )
     if write_csv:
         return export_results(cash_df, date, output_dir=output_dir, verbose=False)
     full_table, narrow, bullish, bearish, top20 = split_shortlists(cash_df)
@@ -391,7 +404,7 @@ def scan_from_cached_bhavcopy(
 def backfill_cached_scans(
     end_date: str,
     output_dir: Optional[Path] = None,
-    lookback: int = HISTORY_LOOKBACK,
+    lookback: int = HISTORY_LOOKBACK_HTF,
     skip_existing: bool = True,
 ) -> List[str]:
     """Write cpr_full_*.csv for each cached cash session so the site archive has those dates."""
@@ -424,7 +437,7 @@ def backfill_cached_scans(
         day = attach_industry(day, mapping=industry, fetch=False)
         day = apply_bullish_cpr_filters(day)
         hist = panel.loc[panel["session"] <= date]
-        day = attach_history_features(day, hist)
+        day = attach_history_features(day, hist, own_window=HISTORY_LOOKBACK)
         export_results(day, date, output_dir=output_dir, verbose=False)
         written.append(date)
     print(f"Archive: {len(dates)} cached sessions, {len(written)} scans written")
@@ -435,8 +448,16 @@ def attach_history_features(
     scan_df: pd.DataFrame,
     history_df: pd.DataFrame,
     own_narrow_q: float = OWN_NARROW_QUANTILE,
+    min_history: int = MIN_HISTORY_DAYS,
+    own_window: Optional[int] = None,
 ) -> pd.DataFrame:
-    """Width percentile vs own history, prior-session overlay, 60d turnover, Setup."""
+    """Width percentile vs own history, prior-session overlay, median turnover, Setup.
+
+    `own_window` limits the width percentile / History_Days / turnover to the most
+    recent N sessions per symbol. Daily scans pass HISTORY_LOOKBACK (60) even when
+    the cache holds ~252 sessions; weekly / monthly HTF bars leave it None so the
+    rank and history counts use every completed bar in the cache.
+    """
     out = scan_df.copy()
     if history_df is None or history_df.empty or "SYMBOL" not in history_df.columns:
         out["Overlay"] = "Unknown"
@@ -450,6 +471,8 @@ def attach_history_features(
     hist = history_df.copy()
     hist["SYMBOL"] = hist["SYMBOL"].astype(str).str.strip().str.upper()
     hist = hist.sort_values(["SYMBOL", "session"])
+    if own_window:
+        hist = hist.groupby("SYMBOL", sort=False).tail(own_window)
     hist["prior_top"] = hist.groupby("SYMBOL")["CPR_Top"].shift(1)
     hist["prior_bot"] = hist.groupby("SYMBOL")["CPR_Bottom"].shift(1)
     hist["Width_Rank_Pct"] = hist.groupby("SYMBOL")["CPR_Width_Pct"].rank(method="average", pct=True)
@@ -475,7 +498,7 @@ def attach_history_features(
     out["History_Days"] = pd.to_numeric(out["History_Days"], errors="coerce").fillna(0).astype(int)
     out["Own_Narrow"] = (
         (out["Width_Rank_Pct"] <= own_narrow_q)
-        & (out["History_Days"] >= MIN_HISTORY_DAYS)
+        & (out["History_Days"] >= min_history)
         & (pd.to_numeric(out["CPR_Width_Pct"], errors="coerce") > 0)
     ).fillna(False).astype(bool)
     above = out["Price_Position"] == "Above CPR"
@@ -491,6 +514,114 @@ def attach_history_features(
         ),
     )
     return out.drop(columns=["prior_top", "prior_bot"], errors="ignore")
+
+
+def last_complete_period_end(scan_date: str, freq: str) -> str:
+    """Last finished week (W-FRI) or month as of scan_date. Incomplete bars are excluded."""
+    d = datetime.strptime(scan_date, "%Y%m%d").date()
+    ts = pd.Timestamp(d)
+    per = ts.to_period(freq)
+    end = per.end_time.date()
+    if freq.startswith("W"):
+        if d >= end or d.weekday() == 4:
+            return end.strftime("%Y%m%d")
+        return (per - 1).end_time.date().strftime("%Y%m%d")
+    last_weekday = end
+    while last_weekday.weekday() >= 5:
+        last_weekday -= timedelta(days=1)
+    if d >= last_weekday:
+        return end.strftime("%Y%m%d")
+    return (per - 1).end_time.date().strftime("%Y%m%d")
+
+
+def htf_applies_label(period_end: str, freq: str) -> str:
+    """The calendar window the completed bar’s CPR is for (next week / next month)."""
+    end = datetime.strptime(period_end, "%Y%m%d").date()
+    if freq.startswith("W"):
+        start = end + timedelta(days=3)
+        while start.weekday() != 0:
+            start += timedelta(days=1)
+        finish = start + timedelta(days=4)
+        return f"Week {start.strftime('%d %b')} – {finish.strftime('%d %b %Y')}"
+    nxt = pd.Timestamp(end).to_period("M") + 1
+    return nxt.strftime("%b %Y")
+
+
+def aggregate_htf_bars(history_df: pd.DataFrame, freq: str) -> pd.DataFrame:
+    """Roll daily OHLC into week or month bars. session = period end YYYYMMDD."""
+    if history_df is None or history_df.empty:
+        return pd.DataFrame()
+    df = history_df.copy()
+    df["SYMBOL"] = df["SYMBOL"].astype(str).str.strip().str.upper()
+    df["dt"] = pd.to_datetime(df["session"].astype(str), format="%Y%m%d", errors="coerce")
+    df = df.dropna(subset=["dt", "SYMBOL", "HIGH", "LOW", "CLOSE"])
+    if df.empty:
+        return pd.DataFrame()
+    df["period_end"] = df["dt"].dt.to_period(freq).dt.end_time.dt.strftime("%Y%m%d")
+    agg = {"OPEN": "first", "HIGH": "max", "LOW": "min", "CLOSE": "last"}
+    if "VALUE" in df.columns:
+        df["VALUE"] = pd.to_numeric(df["VALUE"], errors="coerce")
+        agg["VALUE"] = "sum"
+    for col in ("NAME", "Industry", "Segment"):
+        if col in df.columns:
+            agg[col] = "last"
+    grouped = df.sort_values(["SYMBOL", "dt"]).groupby(["SYMBOL", "period_end"], sort=True)
+    out = grouped.agg(agg).reset_index()
+    out["session"] = out["period_end"]
+    return compute_cpr(out)
+
+
+def build_htf_frame(
+    history_df: pd.DataFrame,
+    scan_date: str,
+    freq: str,
+    min_history: int,
+) -> tuple[pd.DataFrame, str]:
+    """Completed HTF bars up to scan_date, with overlay / own-narrow / Setup."""
+    bars = aggregate_htf_bars(history_df, freq)
+    if bars.empty:
+        return pd.DataFrame(), ""
+    complete_end = last_complete_period_end(scan_date, freq)
+    bars = bars[bars["session"] <= complete_end]
+    if bars.empty:
+        return pd.DataFrame(), ""
+    bars = apply_bullish_cpr_filters(bars)
+    bars = attach_history_features(bars, bars, min_history=min_history)
+    latest = bars["session"].max()
+    frame = bars[bars["session"] == latest].copy()
+    label = htf_applies_label(str(latest), freq)
+    frame["Applies"] = label
+    frame["Timeframe"] = "Weekly" if freq.startswith("W") else "Monthly"
+    return frame.reset_index(drop=True), label
+
+
+def attach_htf_to_result(result: ScanResult, output_dir: Optional[Path] = None, write_csv: bool = True) -> ScanResult:
+    """Add weekly / monthly CPR from cached daily bhavcopies."""
+    output_dir = Path(output_dir) if output_dir is not None else result.output_dir
+    hist_dates = cached_history_dates(result.date, output_dir)
+    if len(hist_dates) < 5:
+        return result
+    panel = load_history_panel(hist_dates, output_dir)
+    if panel.empty:
+        return result
+    weekly, w_label = build_htf_frame(panel, result.date, "W-FRI", MIN_HISTORY_WEEKS)
+    monthly, m_label = build_htf_frame(panel, result.date, "M", MIN_HISTORY_MONTHS)
+    result.weekly = weekly
+    result.monthly = monthly
+    result.weekly_applies = w_label
+    result.monthly_applies = m_label
+    if write_csv:
+        output_dir.mkdir(exist_ok=True)
+        if not weekly.empty:
+            weekly.to_csv(output_dir / f"cpr_weekly_{result.date}.csv", index=False)
+            print(f"✓ Weekly CPR ({w_label}): {len(weekly)} names")
+        if not monthly.empty:
+            monthly.to_csv(output_dir / f"cpr_monthly_{result.date}.csv", index=False)
+            print(f"✓ Monthly CPR ({m_label}): {len(monthly)} names")
+    w_setups = int(weekly["Setup"].isin(["Long", "Short", "Watch"]).sum()) if not weekly.empty and "Setup" in weekly.columns else 0
+    m_setups = int(monthly["Setup"].isin(["Long", "Short", "Watch"]).sum()) if not monthly.empty and "Setup" in monthly.columns else 0
+    print(f"HTF: weekly {w_label or 'n/a'} setups {w_setups} | monthly {m_label or 'n/a'} setups {m_setups}")
+    return result
 
 
 def compute_cpr(df: pd.DataFrame) -> pd.DataFrame:
@@ -583,6 +714,7 @@ DISPLAY_COLS = [
     "Price_Position",
     "Segment",
     "History_Days",
+    "Applies",
     "Bullish_CPR",
     "Bearish_CPR",
 ]
@@ -615,6 +747,8 @@ WEB_EXPORT_COLS = [
     "Segment",
     "History_Days",
     "Value_60d",
+    "Applies",
+    "Timeframe",
     "Bullish_CPR",
     "Bearish_CPR",
 ]
@@ -686,10 +820,12 @@ def load_scan_result(date: str, output_dir: Optional[Path] = None) -> ScanResult
     else:
         hist_dates = cached_history_dates(date, output_dir)
         if date in hist_dates:
-            full = attach_history_features(full, load_history_panel(hist_dates, output_dir))
+            full = attach_history_features(
+                full, load_history_panel(hist_dates, output_dir), own_window=HISTORY_LOOKBACK
+            )
     _, narrow, bullish, bearish, top20 = split_shortlists(full)
     fo_available = "Segment" in full.columns and bool((full["Segment"] == "F&O + Cash").any())
-    return ScanResult(
+    result = ScanResult(
         date=date,
         cash_rows=len(full),
         fo_available=fo_available,
@@ -700,6 +836,17 @@ def load_scan_result(date: str, output_dir: Optional[Path] = None) -> ScanResult
         top20=top20,
         output_dir=output_dir,
     )
+    weekly_path = output_dir / f"cpr_weekly_{date}.csv"
+    monthly_path = output_dir / f"cpr_monthly_{date}.csv"
+    if weekly_path.exists():
+        result.weekly = pd.read_csv(weekly_path)
+        if "Applies" in result.weekly.columns and not result.weekly.empty:
+            result.weekly_applies = str(result.weekly["Applies"].iloc[0])
+    if monthly_path.exists():
+        result.monthly = pd.read_csv(monthly_path)
+        if "Applies" in result.monthly.columns and not result.monthly.empty:
+            result.monthly_applies = str(result.monthly["Applies"].iloc[0])
+    return result
 
 
 def _liquid_enough(df: pd.DataFrame) -> pd.Series:
@@ -796,9 +943,9 @@ def scan_eod_cpr(
     date: str,
     output_dir: Optional[Path] = None,
     write_csv: bool = True,
-    lookback: int = HISTORY_LOOKBACK,
+    lookback: int = HISTORY_LOOKBACK_HTF,
 ) -> ScanResult:
-    """Download bhavcopies, compute CPR, attach 60d history features, optionally write CSVs."""
+    """Download bhavcopies, compute CPR, attach history features, optionally write CSVs."""
     session = _nse_session()
     try:
         cash_raw = download_bhavcopy(CASH_URL, date, session=session)
@@ -826,19 +973,22 @@ def scan_eod_cpr(
             hist_dates = ensure_bhavcopy_history(
                 date, lookback=lookback, output_dir=output_dir, session=session
             )
-            cash_df = attach_history_features(cash_df, load_history_panel(hist_dates, output_dir))
+            cash_df = attach_history_features(
+                cash_df, load_history_panel(hist_dates, output_dir), own_window=HISTORY_LOOKBACK
+            )
             setups = int((cash_df["Setup"].isin(["Long", "Short", "Watch"])).sum()) if "Setup" in cash_df.columns else 0
             own_n = int(cash_df["Own_Narrow"].sum()) if "Own_Narrow" in cash_df.columns else 0
             print(f"History features: Own_Narrow {own_n} | Setups {setups}")
 
         if write_csv:
             result = export_results(cash_df, date, output_dir=output_dir)
+            result = attach_htf_to_result(result, output_dir=output_dir, write_csv=True)
             if lookback and lookback > 0:
                 backfill_cached_scans(date, output_dir=output_dir, lookback=lookback, skip_existing=True)
             return result
 
         full_table, narrow, bullish, bearish, top20 = split_shortlists(cash_df)
-        return ScanResult(
+        result = ScanResult(
             date=date,
             cash_rows=len(cash_df),
             fo_available=fo_df is not None,
@@ -849,6 +999,7 @@ def scan_eod_cpr(
             top20=top20,
             output_dir=Path(output_dir) if output_dir is not None else OUTPUT_DIR,
         )
+        return attach_htf_to_result(result, output_dir=output_dir, write_csv=False)
     finally:
         session.close()
 
@@ -856,18 +1007,18 @@ def scan_eod_cpr(
 def main(argv: Optional[List[str]] = None) -> None:
     argv = list(sys.argv[1:] if argv is None else argv)
     if not argv or argv[0] in ("-h", "--help"):
-        print("Usage: python nse_cpr_scanner.py YYYYMMDD [--lookback 60]")
+        print("Usage: python nse_cpr_scanner.py YYYYMMDD [--lookback 252]")
         print("       python nse_cpr_scanner.py --backfill YYYYMMDD")
         print("Example: python nse_cpr_scanner.py 20260813")
         sys.exit(0 if argv and argv[0] in ("-h", "--help") else 1)
 
-    lookback = HISTORY_LOOKBACK
+    lookback = HISTORY_LOOKBACK_HTF
     if "--lookback" in argv:
         idx = argv.index("--lookback")
         try:
             lookback = int(argv[idx + 1])
         except (IndexError, ValueError):
-            print("--lookback needs an integer, e.g. --lookback 60")
+            print("--lookback needs an integer, e.g. --lookback 252")
             sys.exit(1)
 
     if argv[0] == "--backfill":
