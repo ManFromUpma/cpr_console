@@ -6,6 +6,7 @@ Separate from the Shah CPR console (`cpr_engine.py` / `app.py`) and the
 intraday breakout screener (`cpr_breakout_engine.py` / `breakout_app.py`).
 
 - Downloads NSE bhavcopy CSVs (cash + F&O)
+- Caches ~60 prior cash sessions for own-history width rank and overlay
 - Computes CPR, Width %, classification, and Bullish/Bearish flags
 - Tags F&O vs Cash-only symbols
 - Exports ranked tables and shortlists
@@ -21,6 +22,7 @@ from __future__ import annotations
 
 import io
 import sys
+import time
 import zipfile
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -69,6 +71,11 @@ CASH_SERIES = ("EQ",)
 UNCLASSIFIED_INDUSTRY = "Unclassified"
 INDUSTRY_URL = "https://nsearchives.nseindia.com/content/indices/ind_nifty500list.csv"
 INDUSTRY_CACHE = Path(__file__).resolve().parent / "universes" / "nifty500_industry.csv"
+HISTORY_LOOKBACK = 60
+OWN_NARROW_QUANTILE = 0.25
+MIN_HISTORY_DAYS = 10
+MIN_VALUE_TOP20 = 20_000_000
+BHAVCOPY_SLIM_COLS = ["SYMBOL", "SERIES", "NAME", "OPEN", "HIGH", "LOW", "CLOSE", "VOLUME", "VALUE"]
 
 # ETFs, AMC schemes, index funds, gilt/liquid products listed as EQ.
 NON_EQUITY_NAME = (
@@ -143,8 +150,9 @@ def normalize_bhavcopy(df: pd.DataFrame, cash_only: bool = False) -> pd.DataFram
         raise ValueError(f"Bhavcopy missing columns {missing}. Got: {list(out.columns)}")
 
     out["SYMBOL"] = out["SYMBOL"].astype(str).str.strip().str.upper()
-    for col in ["OPEN", "HIGH", "LOW", "CLOSE"]:
-        out[col] = pd.to_numeric(out[col], errors="coerce")
+    for col in ["OPEN", "HIGH", "LOW", "CLOSE", "VOLUME", "VALUE"]:
+        if col in out.columns:
+            out[col] = pd.to_numeric(out[col], errors="coerce")
 
     if "SERIES" in out.columns:
         out["SERIES"] = out["SERIES"].astype(str).str.strip().str.upper()
@@ -167,13 +175,14 @@ def non_equity_mask(df: pd.DataFrame) -> pd.Series:
     return mask
 
 
-def keep_listed_equity(df: pd.DataFrame) -> pd.DataFrame:
+def keep_listed_equity(df: pd.DataFrame, quiet: bool = False) -> pd.DataFrame:
     """EQ operating companies only — drop ETFs, AMCs, mutual funds, gilt/liquid products."""
     if df.empty:
         return df
     dropped = non_equity_mask(df)
     kept = df.loc[~dropped].copy()
-    print(f"Equity filter: {int(dropped.sum())} ETF/AMC/fund rows dropped → {len(kept)} stocks")
+    if not quiet:
+        print(f"Equity filter: {int(dropped.sum())} ETF/AMC/fund rows dropped → {len(kept)} stocks")
     return kept.reset_index(drop=True)
 
 
@@ -223,6 +232,184 @@ def attach_industry(df: pd.DataFrame, mapping: Optional[dict] = None, fetch: boo
     mapping = mapping if mapping is not None else load_industry_map(fetch=fetch)
     out["Industry"] = out["SYMBOL"].map(mapping).fillna(UNCLASSIFIED_INDUSTRY)
     return out
+
+
+def cpr_overlay(today_top, today_bot, prior_top, prior_bot) -> str:
+    """Shah overlay: today's CPR vs the previous session's CPR."""
+    if pd.isna(prior_top) or pd.isna(prior_bot) or pd.isna(today_top) or pd.isna(today_bot):
+        return "Unknown"
+    if today_bot > prior_top:
+        return "Higher"
+    if today_top < prior_bot:
+        return "Lower"
+    if today_top <= prior_top and today_bot >= prior_bot:
+        return "Inside"
+    if today_top >= prior_top and today_bot <= prior_bot:
+        return "Outside"
+    return "Overlapping"
+
+
+def bhavcopy_cache_dir(output_dir: Optional[Path] = None) -> Path:
+    root = Path(output_dir) if output_dir is not None else OUTPUT_DIR
+    return root / "bhavcopy"
+
+
+def session_date_window(end_date: str, sessions: int = HISTORY_LOOKBACK, calendar_pad: int = 40) -> List[str]:
+    """Newest-first weekday dates, padded so holidays can be skipped."""
+    end = datetime.strptime(end_date, "%Y%m%d").date()
+    dates: List[str] = []
+    cur = end
+    for _ in range(sessions + calendar_pad):
+        if cur.weekday() < 5:
+            dates.append(cur.strftime("%Y%m%d"))
+        cur -= timedelta(days=1)
+    return dates
+
+
+def _slim_bhavcopy(df: pd.DataFrame) -> pd.DataFrame:
+    cols = [c for c in BHAVCOPY_SLIM_COLS if c in df.columns]
+    return df.loc[:, cols].copy()
+
+
+def ensure_bhavcopy_history(
+    end_date: str,
+    lookback: int = HISTORY_LOOKBACK,
+    output_dir: Optional[Path] = None,
+    session: Optional[requests.Session] = None,
+) -> List[str]:
+    """Download and cache up to `lookback` cash EQ bhavcopies ending at end_date."""
+    cache = bhavcopy_cache_dir(output_dir)
+    cache.mkdir(parents=True, exist_ok=True)
+    own = session is None
+    session = session or _nse_session()
+    got: List[str] = []
+    try:
+        for date in session_date_window(end_date, lookback):
+            if len(got) >= lookback:
+                break
+            path = cache / f"cm_{date}.csv"
+            if path.exists() and path.stat().st_size > 0:
+                got.append(date)
+                continue
+            raw = download_bhavcopy(CASH_URL, date, session=session)
+            if raw is None:
+                print(f"  no cash bhavcopy for {date}")
+                time.sleep(0.15)
+                continue
+            try:
+                df = keep_listed_equity(normalize_bhavcopy(raw, cash_only=True), quiet=True)
+            except Exception as exc:
+                print(f"  skip {date}: {exc}")
+                continue
+            _slim_bhavcopy(df).to_csv(path, index=False)
+            print(f"  cached {date}: {len(df)} stocks → {path.name}")
+            got.append(date)
+            time.sleep(0.15)
+    finally:
+        if own:
+            session.close()
+    print(f"Bhavcopy history: {len(got)} sessions ending {end_date}")
+    return got
+
+
+def seed_bhavcopy_cache(df: pd.DataFrame, date: str, output_dir: Optional[Path] = None) -> Path:
+    """Write today's slim cash bhavcopy so history does not re-download it."""
+    cache = bhavcopy_cache_dir(output_dir)
+    cache.mkdir(parents=True, exist_ok=True)
+    path = cache / f"cm_{date}.csv"
+    _slim_bhavcopy(df).to_csv(path, index=False)
+    return path
+
+
+def cached_history_dates(end_date: str, output_dir: Optional[Path] = None, lookback: int = HISTORY_LOOKBACK) -> List[str]:
+    cache = bhavcopy_cache_dir(output_dir)
+    got: List[str] = []
+    for date in session_date_window(end_date, lookback):
+        path = cache / f"cm_{date}.csv"
+        if path.exists() and path.stat().st_size > 0:
+            got.append(date)
+        if len(got) >= lookback:
+            break
+    return got
+
+
+def load_history_panel(dates: List[str], output_dir: Optional[Path] = None) -> pd.DataFrame:
+    cache = bhavcopy_cache_dir(output_dir)
+    frames = []
+    for date in dates:
+        path = cache / f"cm_{date}.csv"
+        if not path.exists():
+            continue
+        df = pd.read_csv(path)
+        if df.empty:
+            continue
+        df["session"] = date
+        frames.append(compute_cpr(df))
+    if not frames:
+        return pd.DataFrame()
+    return pd.concat(frames, ignore_index=True)
+
+
+def attach_history_features(
+    scan_df: pd.DataFrame,
+    history_df: pd.DataFrame,
+    own_narrow_q: float = OWN_NARROW_QUANTILE,
+) -> pd.DataFrame:
+    """Width percentile vs own history, prior-session overlay, 60d turnover, Setup."""
+    out = scan_df.copy()
+    if history_df is None or history_df.empty or "SYMBOL" not in history_df.columns:
+        out["Overlay"] = "Unknown"
+        out["Width_Rank_Pct"] = np.nan
+        out["Own_Narrow"] = False
+        out["History_Days"] = 0
+        out["Value_60d"] = np.nan
+        out["Setup"] = "No setup"
+        return out
+
+    hist = history_df.copy()
+    hist["SYMBOL"] = hist["SYMBOL"].astype(str).str.strip().str.upper()
+    hist = hist.sort_values(["SYMBOL", "session"])
+    hist["prior_top"] = hist.groupby("SYMBOL")["CPR_Top"].shift(1)
+    hist["prior_bot"] = hist.groupby("SYMBOL")["CPR_Bottom"].shift(1)
+    hist["Width_Rank_Pct"] = hist.groupby("SYMBOL")["CPR_Width_Pct"].rank(method="average", pct=True)
+    hist["History_Days"] = hist.groupby("SYMBOL")["session"].transform("count")
+    if "VALUE" in hist.columns:
+        hist["VALUE"] = pd.to_numeric(hist["VALUE"], errors="coerce")
+        hist["Value_60d"] = hist.groupby("SYMBOL")["VALUE"].transform("median")
+    else:
+        hist["Value_60d"] = np.nan
+
+    latest = hist["session"].max()
+    today = hist[hist["session"] == latest][
+        ["SYMBOL", "prior_top", "prior_bot", "Width_Rank_Pct", "History_Days", "Value_60d"]
+    ]
+    out["SYMBOL"] = out["SYMBOL"].astype(str).str.strip().str.upper()
+    out = out.drop(columns=["Overlay", "Width_Rank_Pct", "Own_Narrow", "History_Days", "Value_60d", "Setup"], errors="ignore")
+    out = out.merge(today, on="SYMBOL", how="left")
+    out["Overlay"] = [
+        cpr_overlay(t, b, pt, pb)
+        for t, b, pt, pb in zip(out["CPR_Top"], out["CPR_Bottom"], out["prior_top"], out["prior_bot"])
+    ]
+    out["Width_Rank_Pct"] = pd.to_numeric(out["Width_Rank_Pct"], errors="coerce")
+    out["History_Days"] = pd.to_numeric(out["History_Days"], errors="coerce").fillna(0).astype(int)
+    out["Own_Narrow"] = (
+        (out["Width_Rank_Pct"] <= own_narrow_q)
+        & (out["History_Days"] >= MIN_HISTORY_DAYS)
+        & (pd.to_numeric(out["CPR_Width_Pct"], errors="coerce") > 0)
+    ).fillna(False).astype(bool)
+    above = out["Price_Position"] == "Above CPR"
+    below = out["Price_Position"] == "Below CPR"
+    inside = out["Price_Position"] == "Inside CPR"
+    out["Setup"] = np.where(
+        out["Own_Narrow"] & above & (out["Overlay"] == "Higher"),
+        "Long",
+        np.where(
+            out["Own_Narrow"] & below & (out["Overlay"] == "Lower"),
+            "Short",
+            np.where(out["Own_Narrow"] & inside, "Watch", "No setup"),
+        ),
+    )
+    return out.drop(columns=["prior_top", "prior_bot"], errors="ignore")
 
 
 def compute_cpr(df: pd.DataFrame) -> pd.DataFrame:
@@ -306,10 +493,15 @@ DISPLAY_COLS = [
     "CPR_Top",
     "CPR_Width",
     "CPR_Width_Pct",
+    "Width_Rank_Pct",
     "CPR_Class",
+    "Own_Narrow",
+    "Overlay",
+    "Setup",
     "Bias",
     "Price_Position",
     "Segment",
+    "History_Days",
     "Bullish_CPR",
     "Bearish_CPR",
 ]
@@ -324,6 +516,7 @@ WEB_EXPORT_COLS = [
     "LOW",
     "CLOSE",
     "VOLUME",
+    "VALUE",
     "Pivot",
     "BC",
     "TC",
@@ -331,10 +524,16 @@ WEB_EXPORT_COLS = [
     "CPR_Top",
     "CPR_Width",
     "CPR_Width_Pct",
+    "Width_Rank_Pct",
     "CPR_Class",
+    "Own_Narrow",
+    "Overlay",
+    "Setup",
     "Bias",
     "Price_Position",
     "Segment",
+    "History_Days",
+    "Value_60d",
     "Bullish_CPR",
     "Bearish_CPR",
 ]
@@ -394,13 +593,19 @@ def load_scan_result(date: str, output_dir: Optional[Path] = None) -> ScanResult
     if not full_path.exists():
         raise FileNotFoundError(f"Missing {full_path}")
     full = pd.read_csv(full_path)
-    for col in ("Bullish_CPR", "Bearish_CPR"):
+    for col in ("Bullish_CPR", "Bearish_CPR", "Own_Narrow"):
         if col in full.columns:
             full[col] = full[col].astype(str).str.lower().isin(["true", "1", "yes"])
     if "Bullish_CPR" not in full.columns:
         full = apply_bullish_cpr_filters(full)
     full = keep_listed_equity(full)
     full = attach_industry(full)
+    if "Setup" in full.columns:
+        full["Setup"] = full["Setup"].fillna("No setup").replace({"None": "No setup", "nan": "No setup"})
+    else:
+        hist_dates = cached_history_dates(date, output_dir)
+        if date in hist_dates:
+            full = attach_history_features(full, load_history_panel(hist_dates, output_dir))
     _, narrow, bullish, bearish, top20 = split_shortlists(full)
     fo_available = "Segment" in full.columns and bool((full["Segment"] == "F&O + Cash").any())
     return ScanResult(
@@ -416,13 +621,53 @@ def load_scan_result(date: str, output_dir: Optional[Path] = None) -> ScanResult
     )
 
 
+def _liquid_enough(df: pd.DataFrame) -> pd.Series:
+    if "VALUE" in df.columns:
+        value = pd.to_numeric(df["VALUE"], errors="coerce")
+        if value.notna().any():
+            return value >= MIN_VALUE_TOP20
+    if "Value_60d" in df.columns:
+        return pd.to_numeric(df["Value_60d"], errors="coerce") >= MIN_VALUE_TOP20
+    return pd.Series(True, index=df.index)
+
+
 def split_shortlists(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     full_table = df.sort_values("CPR_Width_Pct").reset_index(drop=True)
     narrow = df[df["CPR_Class"] == "Narrow"].sort_values("CPR_Width_Pct").reset_index(drop=True)
     bullish = df[df["Bullish_CPR"]].sort_values("CPR_Width_Pct").reset_index(drop=True)
     bearish = df[df["Bearish_CPR"]].sort_values("CPR_Width_Pct", ascending=False).reset_index(drop=True)
-    top_cols = [c for c in ["SYMBOL", "Industry", "CLOSE", "CPR_Width_Pct", "Bias", "Price_Position", "Segment"] if c in narrow.columns]
-    ranked = narrow[narrow["CPR_Width_Pct"] > 0] if "CPR_Width_Pct" in narrow.columns else narrow
+    top_cols = [
+        c
+        for c in [
+            "SYMBOL",
+            "Industry",
+            "CLOSE",
+            "CPR_Width_Pct",
+            "Width_Rank_Pct",
+            "Overlay",
+            "Setup",
+            "Own_Narrow",
+            "Bias",
+            "Price_Position",
+            "Segment",
+        ]
+        if c in df.columns
+    ]
+    ranked = pd.DataFrame(columns=df.columns)
+    if "Setup" in df.columns:
+        ranked = df[df["Setup"].isin(["Long", "Short", "Watch"])]
+        if not ranked.empty:
+            liquid_mask = _liquid_enough(ranked).reindex(ranked.index).fillna(False)
+            liquid = ranked.loc[liquid_mask]
+            if not liquid.empty:
+                ranked = liquid
+    if ranked.empty and "Own_Narrow" in df.columns:
+        ranked = df[df["Own_Narrow"].astype(bool)]
+    if ranked.empty:
+        ranked = narrow[narrow["CPR_Width_Pct"] > 0] if "CPR_Width_Pct" in narrow.columns else narrow
+    sort_col = "Width_Rank_Pct" if "Width_Rank_Pct" in ranked.columns else "CPR_Width_Pct"
+    if not ranked.empty and sort_col in ranked.columns:
+        ranked = ranked.sort_values(sort_col, na_position="last")
     top20 = ranked.head(20)[top_cols].reset_index(drop=True) if not ranked.empty else pd.DataFrame(columns=top_cols)
     return full_table, narrow, bullish, bearish, top20
 
@@ -461,8 +706,13 @@ def export_results(df: pd.DataFrame, date: str, output_dir: Optional[Path] = Non
     )
 
 
-def scan_eod_cpr(date: str, output_dir: Optional[Path] = None, write_csv: bool = True) -> ScanResult:
-    """Download bhavcopies, compute CPR, optionally write CSVs."""
+def scan_eod_cpr(
+    date: str,
+    output_dir: Optional[Path] = None,
+    write_csv: bool = True,
+    lookback: int = HISTORY_LOOKBACK,
+) -> ScanResult:
+    """Download bhavcopies, compute CPR, attach 60d history features, optionally write CSVs."""
     session = _nse_session()
     try:
         cash_raw = download_bhavcopy(CASH_URL, date, session=session)
@@ -485,6 +735,16 @@ def scan_eod_cpr(date: str, output_dir: Optional[Path] = None, write_csv: bool =
         cash_df = compute_cpr(cash_df)
         cash_df = apply_bullish_cpr_filters(cash_df)
 
+        seed_bhavcopy_cache(cash_df, date, output_dir=output_dir)
+        if lookback and lookback > 0:
+            hist_dates = ensure_bhavcopy_history(
+                date, lookback=lookback, output_dir=output_dir, session=session
+            )
+            cash_df = attach_history_features(cash_df, load_history_panel(hist_dates, output_dir))
+            setups = int((cash_df["Setup"].isin(["Long", "Short", "Watch"])).sum()) if "Setup" in cash_df.columns else 0
+            own_n = int(cash_df["Own_Narrow"].sum()) if "Own_Narrow" in cash_df.columns else 0
+            print(f"History features: Own_Narrow {own_n} | Setups {setups}")
+
         if write_csv:
             return export_results(cash_df, date, output_dir=output_dir)
 
@@ -504,7 +764,23 @@ def scan_eod_cpr(date: str, output_dir: Optional[Path] = None, write_csv: bool =
         session.close()
 
 
-def main(date: str) -> None:
+def main(argv: Optional[List[str]] = None) -> None:
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if not argv or argv[0] in ("-h", "--help"):
+        print("Usage: python nse_cpr_scanner.py YYYYMMDD [--lookback 60]")
+        print("Example: python nse_cpr_scanner.py 20260813")
+        sys.exit(0 if argv and argv[0] in ("-h", "--help") else 1)
+
+    date = argv[0]
+    lookback = HISTORY_LOOKBACK
+    if "--lookback" in argv:
+        idx = argv.index("--lookback")
+        try:
+            lookback = int(argv[idx + 1])
+        except (IndexError, ValueError):
+            print("--lookback needs an integer, e.g. --lookback 60")
+            sys.exit(1)
+
     print(f"=== NSE EOD CPR Scanner for {date} ===\n")
     try:
         datetime.strptime(date, "%Y%m%d")
@@ -513,7 +789,7 @@ def main(date: str) -> None:
         sys.exit(1)
 
     try:
-        result = scan_eod_cpr(date)
+        result = scan_eod_cpr(date, lookback=lookback)
     except Exception as exc:
         print(f"Scan failed: {exc}")
         sys.exit(1)
@@ -525,8 +801,4 @@ def main(date: str) -> None:
 
 
 if __name__ == "__main__":
-    if len(sys.argv) != 2:
-        print("Usage: python nse_cpr_scanner.py YYYYMMDD")
-        print("Example: python nse_cpr_scanner.py 20260813")
-        sys.exit(1)
-    main(sys.argv[1])
+    main()

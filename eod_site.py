@@ -50,7 +50,11 @@ TABLE_COLS = [
     "Industry",
     "CLOSE",
     "CPR_Width_Pct",
+    "Width_Rank_Pct",
     "CPR_Class",
+    "Own_Narrow",
+    "Overlay",
+    "Setup",
     "Bias",
     "Price_Position",
     "Segment",
@@ -77,7 +81,9 @@ def _records(df: pd.DataFrame) -> list:
                 rec[col] = round(float(val), 2)
             elif col == "CPR_Width_Pct":
                 rec[col] = round(float(val), 4)
-            elif col in ("Bullish_CPR", "Bearish_CPR"):
+            elif col == "Width_Rank_Pct":
+                rec[col] = round(float(val), 3)
+            elif col in ("Bullish_CPR", "Bearish_CPR", "Own_Narrow"):
                 rec[col] = bool(val)
             else:
                 rec[col] = val
@@ -135,6 +141,8 @@ def _payload(result: ScanResult, downloads: dict, dates: Iterable[str], home_hre
     industries = []
     if "Industry" in result.full.columns:
         industries = sorted(result.full["Industry"].dropna().astype(str).unique().tolist())
+    own_n = int(result.full["Own_Narrow"].sum()) if "Own_Narrow" in result.full.columns else 0
+    setups = int(result.full["Setup"].isin(["Long", "Short", "Watch"]).sum()) if "Setup" in result.full.columns else 0
     return {
         "date": result.date,
         "label": _date_label(result.date),
@@ -144,8 +152,9 @@ def _payload(result: ScanResult, downloads: dict, dates: Iterable[str], home_hre
         "metrics": {
             "symbols": int(result.cash_rows),
             "narrow": int(len(result.narrow)),
+            "own_narrow": own_n,
+            "setups": setups,
             "bullish": int(len(result.bullish)),
-            "bearish": int(len(result.bearish)),
             "fo": fo_n,
         },
         "downloads": downloads,
@@ -177,7 +186,7 @@ def _page_html(payload: dict, asset_prefix: str) -> str:
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <title>EOD CPR · {html.escape(payload["label"])}</title>
   <base href="{asset_prefix}">
-  <link rel="stylesheet" href="assets/style.css?v=2"/>
+  <link rel="stylesheet" href="assets/style.css?v=3"/>
 </head>
 <body>
   <header class="top">
@@ -208,6 +217,9 @@ def _page_html(payload: dict, asset_prefix: str) -> str:
     </label>
     <select id="klass"><option value="Any">Any class</option><option>Narrow</option><option>Moderate</option><option>Wide</option></select>
     <select id="bias"><option value="Any">Any bias</option><option>Bullish</option><option>Bearish</option><option>Neutral</option></select>
+    <select id="overlay"><option value="Any">Any overlay</option><option>Higher</option><option>Lower</option><option>Inside</option><option>Outside</option><option>Overlapping</option></select>
+    <select id="setup"><option value="Any">Any setup</option><option>Long</option><option>Short</option><option>Watch</option><option>No setup</option></select>
+    <select id="ownNarrow"><option value="Any">Own-narrow: any</option><option value="Yes">Own-narrow</option><option value="No">Not own-narrow</option></select>
   </section>
 
   <nav class="tabs" id="tabs">
@@ -228,12 +240,14 @@ def _page_html(payload: dict, asset_prefix: str) -> str:
 
   <footer>
     Equity stocks only (ETFs, AMCs, mutual funds excluded). Industry from Nifty 500.
-    Built from NSE UDI cash + F&amp;O bhavcopy. CPR = Pivot (H+L+C)/3, BC (H+L)/2, TC 2P−BC.
-    Narrow ≤ 0.25% · Moderate 0.25–0.75% · Wide &gt; 0.75%.
-    Bullish CPR = close above CPR + Pivot &gt; BC + narrow.
+    Built from NSE UDI cash + F&amp;O bhavcopy plus ~60 prior cash sessions.
+    CPR = Pivot (H+L+C)/3, BC (H+L)/2, TC 2P−BC.
+    Absolute Narrow ≤ 0.25%. Own_Narrow = bottom 25% of that name’s last 60 widths.
+    Overlay = today’s CPR vs prior session. Setup = Own_Narrow + side + overlay.
+    Top 20 ranks liquid setups (VALUE ≥ ₹2 cr) by width percentile.
   </footer>
   <script>window.CPR_DATA = {data};</script>
-  <script src="assets/app.js?v=2"></script>
+  <script src="assets/app.js?v=3"></script>
 </body>
 </html>
 """
@@ -260,7 +274,7 @@ h1 { margin: 4px 0 0; font-size: 28px; font-weight: 650; }
 #industry { min-width: 220px; }
 select, input { background: var(--card); color: var(--text); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; }
 .banner { margin: 16px 24px; padding: 12px 14px; background: #18202a; border: 1px solid var(--line); border-radius: 10px; color: var(--muted); font-size: 13px; }
-.metrics { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 10px; padding: 0 24px 16px; }
+.metrics { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 10px; padding: 0 24px 16px; }
 .metric { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px; }
 .metric span { display: block; color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .08em; }
 .metric b { font-size: 22px; }
@@ -290,7 +304,7 @@ footer { padding: 12px 24px 32px; color: var(--muted); font-size: 12px; border-t
 
 JS = r"""
 const DATA = window.CPR_DATA;
-const COLS = ["SYMBOL","Industry","CLOSE","CPR_Width_Pct","CPR_Class","Bias","Price_Position","Segment","Pivot","BC","TC"];
+const COLS = ["SYMBOL","Industry","CLOSE","CPR_Width_Pct","Width_Rank_Pct","CPR_Class","Own_Narrow","Overlay","Setup","Bias","Price_Position","Segment","Pivot","BC","TC"];
 let tab = "full";
 
 function $(id) { return document.getElementById(id); }
@@ -333,8 +347,9 @@ function metrics() {
   $("metrics").innerHTML = [
     ["EQ symbols", m.symbols],
     ["Narrow", m.narrow],
+    ["Own narrow", m.own_narrow ?? "—"],
+    ["Setups", m.setups ?? "—"],
     ["Bullish CPR", m.bullish],
-    ["Bearish CPR", m.bearish],
     ["F&O names", m.fo],
   ].map(([k,v]) => `<div class="metric"><span>${k}</span><b>${v}</b></div>`).join("");
 }
@@ -354,6 +369,8 @@ function downloads() {
 function fmt(col, val) {
   if (val === null || val === undefined) return "—";
   if (col === "CPR_Width_Pct") return Number(val).toFixed(4);
+  if (col === "Width_Rank_Pct") return Number(val).toFixed(2);
+  if (col === "Own_Narrow") return val ? "Yes" : "No";
   if (["CLOSE","Pivot","BC","TC"].includes(col)) return Number(val).toFixed(2);
   return val;
 }
@@ -364,6 +381,12 @@ function klass(col, val) {
   if (col === "Price_Position" && val === "Above CPR") return "bull";
   if (col === "Price_Position" && val === "Below CPR") return "bear";
   if (col === "CPR_Class" && val === "Narrow") return "narrow";
+  if (col === "Overlay" && val === "Higher") return "bull";
+  if (col === "Overlay" && val === "Lower") return "bear";
+  if (col === "Setup" && val === "Long") return "bull";
+  if (col === "Setup" && val === "Short") return "bear";
+  if (col === "Setup" && val === "Watch") return "narrow";
+  if (col === "Own_Narrow" && val === true) return "narrow";
   return "";
 }
 
@@ -373,12 +396,19 @@ function rows() {
   const industry = $("industry").value;
   const klassv = $("klass").value;
   const bias = $("bias").value;
+  const overlay = $("overlay") ? $("overlay").value : "Any";
+  const setup = $("setup") ? $("setup").value : "Any";
+  const ownNarrow = $("ownNarrow") ? $("ownNarrow").value : "Any";
   return (DATA.tables[tab] || []).filter(r => {
     if (q && !(String(r.SYMBOL || "").includes(q))) return false;
     if (segment !== "Any" && r.Segment !== segment) return false;
     if (industry !== "Any" && r.Industry !== industry) return false;
     if (klassv !== "Any" && r.CPR_Class !== klassv) return false;
     if (bias !== "Any" && r.Bias !== bias) return false;
+    if (overlay !== "Any" && r.Overlay !== overlay) return false;
+    if (setup !== "Any" && r.Setup !== setup) return false;
+    if (ownNarrow === "Yes" && !r.Own_Narrow) return false;
+    if (ownNarrow === "No" && r.Own_Narrow) return false;
     return true;
   });
 }
@@ -400,7 +430,10 @@ document.querySelectorAll(".tabs button").forEach(btn => {
     render();
   });
 });
-["search","segment","industry","klass","bias"].forEach(id => $(id).addEventListener("input", render));
+["search","segment","industry","klass","bias","overlay","setup","ownNarrow"].forEach(id => {
+  const el = $(id);
+  if (el) el.addEventListener("input", render);
+});
 fillDates();
 fillIndustry();
 metrics();

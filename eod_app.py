@@ -16,7 +16,7 @@ import pandas as pd
 import pytz
 import streamlit as st
 
-from nse_cpr_scanner import DISPLAY_COLS, scan_eod_cpr
+from nse_cpr_scanner import DISPLAY_COLS, HISTORY_LOOKBACK, scan_eod_cpr
 
 IST = pytz.timezone("Asia/Kolkata")
 
@@ -74,6 +74,24 @@ def color_position(val: str) -> str:
     return ""
 
 
+def color_overlay(val: str) -> str:
+    if val == "Higher":
+        return "color: #2e7d32; font-weight: 600"
+    if val == "Lower":
+        return "color: #c62828; font-weight: 600"
+    return ""
+
+
+def color_setup(val: str) -> str:
+    if val == "Long":
+        return "color: #2e7d32; font-weight: 600"
+    if val == "Short":
+        return "color: #c62828; font-weight: 600"
+    if val == "Watch":
+        return "color: #6a1b9a; font-weight: 600"
+    return ""
+
+
 def style_table(df: pd.DataFrame):
     styled = df.style
     if "Bias" in df.columns:
@@ -84,6 +102,10 @@ def style_table(df: pd.DataFrame):
         styled = styled.map(color_segment, subset=["Segment"])
     if "Price_Position" in df.columns:
         styled = styled.map(color_position, subset=["Price_Position"])
+    if "Overlay" in df.columns:
+        styled = styled.map(color_overlay, subset=["Overlay"])
+    if "Setup" in df.columns:
+        styled = styled.map(color_setup, subset=["Setup"])
     return styled
 
 
@@ -95,6 +117,8 @@ def format_view(df: pd.DataFrame) -> pd.DataFrame:
             show[col] = show[col].apply(lambda x: f"{x:.2f}" if pd.notna(x) else "—")
     if "CPR_Width_Pct" in show.columns:
         show["CPR_Width_Pct"] = show["CPR_Width_Pct"].apply(lambda x: f"{x:.4f}" if pd.notna(x) else "—")
+    if "Width_Rank_Pct" in show.columns:
+        show["Width_Rank_Pct"] = show["Width_Rank_Pct"].apply(lambda x: f"{x:.2f}" if pd.notna(x) else "—")
     cols = [c for c in DISPLAY_COLS if c in show.columns]
     extra = [c for c in show.columns if c not in cols]
     return show[cols + extra]
@@ -117,6 +141,13 @@ with st.sidebar:
         help="NSE cash + F&O UDI bhavcopy. Use the last completed session.",
     )
     date_str = scan_date.strftime("%Y%m%d")
+    lookback = st.number_input(
+        "History lookback (sessions)",
+        min_value=0,
+        max_value=120,
+        value=HISTORY_LOOKBACK,
+        help="Cash bhavcopies cached under cpr_output/bhavcopy for overlay and own-width rank.",
+    )
 
     segment_filter = st.selectbox("Segment", ["Any", "F&O + Cash", "Cash Only"], index=0)
     industries = ["Any"]
@@ -132,18 +163,24 @@ with st.sidebar:
         ["Any", "Above CPR", "Inside CPR", "Below CPR"],
         index=0,
     )
+    overlay_filter = st.selectbox(
+        "Overlay vs prior CPR",
+        ["Any", "Higher", "Lower", "Inside", "Outside", "Overlapping", "Unknown"],
+        index=0,
+    )
+    setup_filter = st.selectbox("Setup", ["Any", "Long", "Short", "Watch", "No setup"], index=0)
+    own_narrow_filter = st.selectbox("Own-history narrow", ["Any", "Yes", "No"], index=0)
 
-    st.caption("Narrow ≤ 0.25% · Moderate 0.25–0.75% · Wide > 0.75%")
+    st.caption("Absolute Narrow ≤ 0.25% · Own_Narrow = bottom 25% of that name’s last 60 sessions")
 
 
 st.title("📥 NSE EOD CPR Scanner")
 st.markdown(
     """
 **Separate from the Shah CPR console (port 8501) and the breakout screener (port 8502).**
-Downloads NSE **cash + F&O bhavcopies**, computes CPR from that session's H/L/C,
-classifies width, tags F&O vs cash-only, and shortlists bullish / bearish names.
-
-Those CPR levels apply to the **next** session. *Research only. Not investment advice.*
+Downloads NSE **cash + F&O bhavcopies**, caches ~60 prior cash sessions,
+computes CPR from that session's H/L/C, ranks width vs each name's own history,
+and tags overlay / Setup for the **next** session. *Research only. Not investment advice.*
 """
 )
 
@@ -151,12 +188,12 @@ col_a, col_b = st.columns([1, 3])
 with col_a:
     run_scan = st.button("🔍 Scan bhavcopy", type="primary", use_container_width=True)
 with col_b:
-    st.caption(f"NSE archives · listed equity only (no ETF/AMC/MF) · date {date_str}")
+    st.caption(f"NSE archives · listed equity only (no ETF/AMC/MF) · {lookback}d history · date {date_str}")
 
 if run_scan:
-    with st.spinner(f"Downloading NSE bhavcopies for {date_str}…"):
+    with st.spinner(f"Downloading NSE bhavcopies and {lookback}-session history for {date_str}…"):
         try:
-            st.session_state.eod_scan = scan_eod_cpr(date_str)
+            st.session_state.eod_scan = scan_eod_cpr(date_str, lookback=int(lookback))
             st.session_state.eod_error = None
         except Exception as exc:
             st.session_state.eod_scan = None
@@ -170,12 +207,13 @@ if result is None:
     st.info("Pick a session date and click **Scan bhavcopy**. Typical choice is the last trading day.")
     st.stop()
 
-m1, m2, m3, m4, m5 = st.columns(5)
+m1, m2, m3, m4, m5, m6 = st.columns(6)
 m1.metric("EQ symbols", result.cash_rows)
 m2.metric("Narrow", len(result.narrow))
-m3.metric("Bullish CPR", len(result.bullish))
-m4.metric("Bearish CPR", len(result.bearish))
-m5.metric("F&O tagged", "Yes" if result.fo_available else "No")
+m3.metric("Own narrow", int(result.full["Own_Narrow"].sum()) if "Own_Narrow" in result.full.columns else "—")
+m4.metric("Setups", int(result.full["Setup"].isin(["Long", "Short", "Watch"]).sum()) if "Setup" in result.full.columns else "—")
+m5.metric("Bullish CPR", len(result.bullish))
+m6.metric("F&O tagged", "Yes" if result.fo_available else "No")
 st.caption(f"Session {result.date} · files in `{result.output_dir}`")
 
 
@@ -191,6 +229,13 @@ def apply_filters(df: pd.DataFrame) -> pd.DataFrame:
         view = view[view["Bias"] == bias_filter]
     if position_filter != "Any" and "Price_Position" in view.columns:
         view = view[view["Price_Position"] == position_filter]
+    if overlay_filter != "Any" and "Overlay" in view.columns:
+        view = view[view["Overlay"] == overlay_filter]
+    if setup_filter != "Any" and "Setup" in view.columns:
+        view = view[view["Setup"] == setup_filter]
+    if own_narrow_filter != "Any" and "Own_Narrow" in view.columns:
+        want = own_narrow_filter == "Yes"
+        view = view[view["Own_Narrow"].astype(bool) == want]
     return view.reset_index(drop=True)
 
 
@@ -259,7 +304,7 @@ with tab_bear:
         )
 
 with tab_top:
-    st.caption("Tightest 20 narrow CPR names — breakout candidates for the next session")
+    st.caption("Tradable setups: Own_Narrow + overlay, day’s turnover ≥ ₹2 cr, ranked by width percentile")
     if result.top20.empty:
         st.info("No narrow names to rank.")
     else:
@@ -287,12 +332,16 @@ This app on **port 8503** is a **third screener**:
 4. CPR from that session's H/L/C:
    `P = (H+L+C)/3`, `BC = (H+L)/2`, `TC = 2P − BC`
 5. Width % = `(CPR Top − CPR Bottom) / Close × 100`
-6. **Narrow** ≤ 0.25% · **Moderate** 0.25–0.75% · **Wide** > 0.75%
-7. **Bullish CPR**: close above CPR + Pivot > BC + narrow
-8. **Bearish CPR**: close below CPR + Pivot < BC
-9. Tag each cash symbol **F&O + Cash** if it appears in the F&O bhavcopy
+6. **Narrow** ≤ 0.25% · **Moderate** 0.25–0.75% · **Wide** > 0.75% (absolute labels)
+7. **Own_Narrow**: this name’s width is in the bottom 25% of its last ~60 sessions
+8. **Overlay**: today’s CPR vs the prior session — Higher / Lower / Inside / Outside / Overlapping
+9. **Setup**: Long = Own_Narrow + Above CPR + Higher overlay; Short = Own_Narrow + Below + Lower; Watch = Own_Narrow + Inside
+10. **Bullish CPR** (legacy): close above CPR + Pivot > BC + width < 0.25%
+11. **Bearish CPR** (legacy): close below CPR + Pivot < BC
+12. Tag each cash symbol **F&O + Cash** if it appears in the F&O bhavcopy
+13. Top 20 ranks Setup names with VALUE ≥ ₹2 cr by width percentile, not raw Width %
 
-**Not the same as the live console.** This is EOD, exchange bhavcopy, no Yahoo, no virgin-CPR / overlay live quotes.
+**Not the same as the live console.** This is EOD, exchange bhavcopy, no Yahoo, no virgin-CPR live quotes.
 """
     )
 

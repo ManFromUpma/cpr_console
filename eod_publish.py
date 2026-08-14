@@ -21,19 +21,20 @@ from pathlib import Path
 from eod_site import build_site
 from nse_cpr_scanner import (
     OUTPUT_DIR,
+    HISTORY_LOOKBACK,
     candidate_session_dates,
     discover_scan_dates,
     scan_eod_cpr,
 )
 
 
-def scan_latest(date: str | None, output_dir: Path) -> str:
+def scan_latest(date: str | None, output_dir: Path, lookback: int = HISTORY_LOOKBACK) -> str:
     dates = [date] if date else candidate_session_dates()
     last_error = None
     for candidate in dates:
         print(f"Trying session {candidate}…")
         try:
-            result = scan_eod_cpr(candidate, output_dir=output_dir)
+            result = scan_eod_cpr(candidate, output_dir=output_dir, lookback=lookback)
             print(f"Scanned {result.date}: {result.cash_rows} EQ names")
             return result.date
         except Exception as exc:
@@ -48,6 +49,12 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--site-only", action="store_true", help="Rebuild HTML from existing CSVs")
     parser.add_argument("--output-dir", default=str(OUTPUT_DIR))
     parser.add_argument("--site-dir", default="site")
+    parser.add_argument(
+        "--lookback",
+        type=int,
+        default=HISTORY_LOOKBACK,
+        help="Prior cash sessions to cache for overlay / own-narrow (default 60)",
+    )
     args = parser.parse_args(argv)
 
     output_dir = Path(args.output_dir)
@@ -56,7 +63,7 @@ def main(argv: list[str] | None = None) -> None:
         sys.exit(1)
 
     if not args.site_only:
-        scan_latest(args.date, output_dir)
+        scan_latest(args.date, output_dir, lookback=args.lookback)
     elif not discover_scan_dates(output_dir):
         print(f"No CSVs in {output_dir}. Run without --site-only first.")
         sys.exit(1)

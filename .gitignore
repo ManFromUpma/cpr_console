@@ -3,3 +3,9 @@ __pycache__/
 *.pyc
 .DS_Store
 site/
+cpr_output/bhavcopy/
+.env
+dhan_live/.env
+dhan_live/dhan_credentials.env
+dhan_live/.cache/
+
