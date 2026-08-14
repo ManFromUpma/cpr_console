@@ -47,6 +47,7 @@ ROUND_2 = {
 }
 TABLE_COLS = [
     "SYMBOL",
+    "Industry",
     "CLOSE",
     "CPR_Width_Pct",
     "CPR_Class",
@@ -131,11 +132,15 @@ def _write_downloads(result: ScanResult, dest: Path) -> dict:
 
 def _payload(result: ScanResult, downloads: dict, dates: Iterable[str], home_href: str) -> dict:
     fo_n = int((result.full["Segment"] == "F&O + Cash").sum()) if "Segment" in result.full.columns else 0
+    industries = []
+    if "Industry" in result.full.columns:
+        industries = sorted(result.full["Industry"].dropna().astype(str).unique().tolist())
     return {
         "date": result.date,
         "label": _date_label(result.date),
         "home": home_href,
         "dates": [{"id": d, "label": _date_label(d)} for d in dates],
+        "industries": industries,
         "metrics": {
             "symbols": int(result.cash_rows),
             "narrow": int(len(result.narrow)),
@@ -188,6 +193,7 @@ def _page_html(payload: dict, asset_prefix: str) -> str:
   <section class="toolbar">
     <input id="search" type="search" placeholder="Search symbol…" autocomplete="off"/>
     <select id="segment"><option value="Any">Any segment</option><option>F&amp;O + Cash</option><option>Cash Only</option></select>
+    <select id="industry"><option value="Any">Any industry</option></select>
     <select id="klass"><option value="Any">Any class</option><option>Narrow</option><option>Moderate</option><option>Wide</option></select>
     <select id="bias"><option value="Any">Any bias</option><option>Bullish</option><option>Bearish</option><option>Neutral</option></select>
   </section>
@@ -209,6 +215,7 @@ def _page_html(payload: dict, asset_prefix: str) -> str:
   </div>
 
   <footer>
+    Equity stocks only (ETFs, AMCs, mutual funds excluded). Industry from Nifty 500.
     Built from NSE UDI cash + F&amp;O bhavcopy. CPR = Pivot (H+L+C)/3, BC (H+L)/2, TC 2P−BC.
     Narrow ≤ 0.25% · Moderate 0.25–0.75% · Wide &gt; 0.75%.
     Bullish CPR = close above CPR + Pivot &gt; BC + narrow.
@@ -270,10 +277,20 @@ footer { padding: 12px 24px 32px; color: var(--muted); font-size: 12px; border-t
 
 JS = r"""
 const DATA = window.CPR_DATA;
-const COLS = ["SYMBOL","CLOSE","CPR_Width_Pct","CPR_Class","Bias","Price_Position","Segment","Pivot","BC","TC"];
+const COLS = ["SYMBOL","Industry","CLOSE","CPR_Width_Pct","CPR_Class","Bias","Price_Position","Segment","Pivot","BC","TC"];
 let tab = "full";
 
 function $(id) { return document.getElementById(id); }
+
+function fillIndustry() {
+  const sel = $("industry");
+  (DATA.industries || []).forEach(name => {
+    const opt = document.createElement("option");
+    opt.value = name;
+    opt.textContent = name;
+    sel.appendChild(opt);
+  });
+}
 
 function fillDates() {
   const sel = $("dateSelect");
@@ -339,11 +356,13 @@ function klass(col, val) {
 function rows() {
   const q = $("search").value.trim().toUpperCase();
   const segment = $("segment").value;
+  const industry = $("industry").value;
   const klassv = $("klass").value;
   const bias = $("bias").value;
   return (DATA.tables[tab] || []).filter(r => {
     if (q && !(String(r.SYMBOL || "").includes(q))) return false;
     if (segment !== "Any" && r.Segment !== segment) return false;
+    if (industry !== "Any" && r.Industry !== industry) return false;
     if (klassv !== "Any" && r.CPR_Class !== klassv) return false;
     if (bias !== "Any" && r.Bias !== bias) return false;
     return true;
@@ -367,8 +386,9 @@ document.querySelectorAll(".tabs button").forEach(btn => {
     render();
   });
 });
-["search","segment","klass","bias"].forEach(id => $(id).addEventListener("input", render));
+["search","segment","industry","klass","bias"].forEach(id => $(id).addEventListener("input", render));
 fillDates();
+fillIndustry();
 metrics();
 downloads();
 render();

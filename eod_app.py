@@ -119,6 +119,12 @@ with st.sidebar:
     date_str = scan_date.strftime("%Y%m%d")
 
     segment_filter = st.selectbox("Segment", ["Any", "F&O + Cash", "Cash Only"], index=0)
+    industries = ["Any"]
+    if st.session_state.eod_scan is not None and "Industry" in st.session_state.eod_scan.full.columns:
+        industries += sorted(
+            st.session_state.eod_scan.full["Industry"].dropna().astype(str).unique().tolist()
+        )
+    industry_filter = st.selectbox("Industry", industries, index=0)
     class_filter = st.selectbox("CPR class", ["Any", "Narrow", "Moderate", "Wide"], index=0)
     bias_filter = st.selectbox("Bias", ["Any", "Bullish", "Bearish", "Neutral"], index=0)
     position_filter = st.selectbox(
@@ -145,7 +151,7 @@ col_a, col_b = st.columns([1, 3])
 with col_a:
     run_scan = st.button("🔍 Scan bhavcopy", type="primary", use_container_width=True)
 with col_b:
-    st.caption(f"NSE archives · cash EQ · date {date_str}")
+    st.caption(f"NSE archives · listed equity only (no ETF/AMC/MF) · date {date_str}")
 
 if run_scan:
     with st.spinner(f"Downloading NSE bhavcopies for {date_str}…"):
@@ -177,6 +183,8 @@ def apply_filters(df: pd.DataFrame) -> pd.DataFrame:
     view = df.copy()
     if segment_filter != "Any" and "Segment" in view.columns:
         view = view[view["Segment"] == segment_filter]
+    if industry_filter != "Any" and "Industry" in view.columns:
+        view = view[view["Industry"] == industry_filter]
     if class_filter != "Any" and "CPR_Class" in view.columns:
         view = view[view["CPR_Class"] == class_filter]
     if bias_filter != "Any" and "Bias" in view.columns:
@@ -274,14 +282,15 @@ The main **CPR Screening Console** stays on **port 8501**. The **breakout screen
 This app on **port 8503** is a **third screener**:
 
 1. Download NSE cash (`CM`) and F&O (`FO`) UDI bhavcopies for one session
-2. Keep **EQ** cash symbols
-3. CPR from that session's H/L/C:
+2. Keep **EQ operating companies** — drop ETFs, AMC schemes, mutual funds, liquid/gilt products
+3. Join **Industry** from the Nifty 500 constituent list (other names = Unclassified)
+4. CPR from that session's H/L/C:
    `P = (H+L+C)/3`, `BC = (H+L)/2`, `TC = 2P − BC`
-4. Width % = `(CPR Top − CPR Bottom) / Close × 100`
-5. **Narrow** ≤ 0.25% · **Moderate** 0.25–0.75% · **Wide** > 0.75%
-6. **Bullish CPR**: close above CPR + Pivot > BC + narrow
-7. **Bearish CPR**: close below CPR + Pivot < BC
-8. Tag each cash symbol **F&O + Cash** if it appears in the F&O bhavcopy
+5. Width % = `(CPR Top − CPR Bottom) / Close × 100`
+6. **Narrow** ≤ 0.25% · **Moderate** 0.25–0.75% · **Wide** > 0.75%
+7. **Bullish CPR**: close above CPR + Pivot > BC + narrow
+8. **Bearish CPR**: close below CPR + Pivot < BC
+9. Tag each cash symbol **F&O + Cash** if it appears in the F&O bhavcopy
 
 **Not the same as the live console.** This is EOD, exchange bhavcopy, no Yahoo, no virgin-CPR / overlay live quotes.
 """

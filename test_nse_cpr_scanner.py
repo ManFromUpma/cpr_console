@@ -8,8 +8,10 @@ import pandas as pd
 
 from nse_cpr_scanner import (
     apply_bullish_cpr_filters,
+    attach_industry,
     compute_cpr,
     export_results,
+    keep_listed_equity,
     normalize_bhavcopy,
     split_shortlists,
     tag_fo_symbols,
@@ -128,6 +130,29 @@ class TestExport(unittest.TestCase):
             self.assertTrue((Path(tmp) / "cpr_full_20260813.csv").exists())
             self.assertEqual(result.date, "20260813")
             self.assertFalse(result.top20.empty)
+
+
+class TestEquityAndIndustry(unittest.TestCase):
+    def test_drops_etf_amc_liquid(self):
+        df = pd.DataFrame(
+            {
+                "SYMBOL": ["RELIANCE", "LIQUIDCASE", "NIFTYBEES", "GOLDIAM"],
+                "NAME": [
+                    "RELIANCE INDUSTRIES LTD",
+                    "ZERODHAAMC - LIQUIDCASE",
+                    "NIPPON INDIA ETF NIFTY BEES",
+                    "GOLDIAM INTERNATIONAL LTD",
+                ],
+            }
+        )
+        kept = keep_listed_equity(df)
+        self.assertListEqual(kept["SYMBOL"].tolist(), ["RELIANCE", "GOLDIAM"])
+
+    def test_attach_industry_map(self):
+        df = pd.DataFrame({"SYMBOL": ["ABB", "ZZZSMALL"]})
+        out = attach_industry(df, mapping={"ABB": "Capital Goods"}, fetch=False)
+        self.assertEqual(out.loc[out["SYMBOL"] == "ABB", "Industry"].iloc[0], "Capital Goods")
+        self.assertEqual(out.loc[out["SYMBOL"] == "ZZZSMALL", "Industry"].iloc[0], "Unclassified")
 
 
 if __name__ == "__main__":

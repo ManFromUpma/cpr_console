@@ -66,6 +66,16 @@ COLUMN_ALIASES = {
 }
 
 CASH_SERIES = ("EQ",)
+UNCLASSIFIED_INDUSTRY = "Unclassified"
+INDUSTRY_URL = "https://nsearchives.nseindia.com/content/indices/ind_nifty500list.csv"
+INDUSTRY_CACHE = Path(__file__).resolve().parent / "universes" / "nifty500_industry.csv"
+
+# ETFs, AMC schemes, index funds, gilt/liquid products listed as EQ.
+NON_EQUITY_NAME = (
+    r"AMC|\bETF\b|BEES|IETF|MUTUAL\s*FUND|INDEX FUND|\bFOF\b|"
+    r"LIQUID FUND|LIQUID ETF|GOLD ETF|SILVER ETF"
+)
+NON_EQUITY_SYMBOL = r"ETF|BEES|IETF|LIQUID|GILT|GSEC|INVIT"
 
 
 @dataclass
@@ -147,6 +157,74 @@ def normalize_bhavcopy(df: pd.DataFrame, cash_only: bool = False) -> pd.DataFram
     return out.reset_index(drop=True)
 
 
+def non_equity_mask(df: pd.DataFrame) -> pd.Series:
+    """True for ETFs, AMC products, liquid/gilt funds, not operating companies."""
+    symbol = df["SYMBOL"].astype(str)
+    mask = symbol.str.contains(NON_EQUITY_SYMBOL, case=False, regex=True, na=False)
+    if "NAME" in df.columns:
+        name = df["NAME"].astype(str)
+        mask = mask | name.str.contains(NON_EQUITY_NAME, case=False, regex=True, na=False)
+    return mask
+
+
+def keep_listed_equity(df: pd.DataFrame) -> pd.DataFrame:
+    """EQ operating companies only — drop ETFs, AMCs, mutual funds, gilt/liquid products."""
+    if df.empty:
+        return df
+    dropped = non_equity_mask(df)
+    kept = df.loc[~dropped].copy()
+    print(f"Equity filter: {int(dropped.sum())} ETF/AMC/fund rows dropped → {len(kept)} stocks")
+    return kept.reset_index(drop=True)
+
+
+def load_industry_map(session: Optional[requests.Session] = None, fetch: bool = True) -> dict:
+    """Symbol → NSE Indices industry (Nifty 500 list). Cache under universes/."""
+    if INDUSTRY_CACHE.exists():
+        cached = pd.read_csv(INDUSTRY_CACHE)
+        if "Symbol" in cached.columns and "Industry" in cached.columns:
+            mapping = {
+                str(sym).strip().upper(): str(ind).strip()
+                for sym, ind in zip(cached["Symbol"], cached["Industry"])
+                if pd.notna(sym) and pd.notna(ind)
+            }
+            if mapping:
+                return mapping
+    if not fetch:
+        return {}
+    own = session is None
+    session = session or _nse_session()
+    try:
+        response = session.get(INDUSTRY_URL, timeout=30)
+        response.raise_for_status()
+        table = pd.read_csv(io.BytesIO(response.content))
+        table.columns = [str(c).strip() for c in table.columns]
+        if "Symbol" not in table.columns or "Industry" not in table.columns:
+            print(f"Industry file missing columns: {list(table.columns)}")
+            return {}
+        INDUSTRY_CACHE.parent.mkdir(exist_ok=True)
+        table.to_csv(INDUSTRY_CACHE, index=False)
+        print(f"Industry map: {len(table)} Nifty 500 names → {INDUSTRY_CACHE}")
+        return {
+            str(sym).strip().upper(): str(ind).strip()
+            for sym, ind in zip(table["Symbol"], table["Industry"])
+            if pd.notna(sym) and pd.notna(ind)
+        }
+    except Exception as exc:
+        print(f"Industry map unavailable: {exc}")
+        return {}
+    finally:
+        if own:
+            session.close()
+
+
+def attach_industry(df: pd.DataFrame, mapping: Optional[dict] = None, fetch: bool = True) -> pd.DataFrame:
+    """Join Nifty 500 industry. Names outside that list are Unclassified."""
+    out = df.copy()
+    mapping = mapping if mapping is not None else load_industry_map(fetch=fetch)
+    out["Industry"] = out["SYMBOL"].map(mapping).fillna(UNCLASSIFIED_INDUSTRY)
+    return out
+
+
 def compute_cpr(df: pd.DataFrame) -> pd.DataFrame:
     """
     Compute CPR columns for a bhavcopy DataFrame.
@@ -217,6 +295,8 @@ def apply_bullish_cpr_filters(df: pd.DataFrame) -> pd.DataFrame:
 
 DISPLAY_COLS = [
     "SYMBOL",
+    "NAME",
+    "Industry",
     "SERIES",
     "CLOSE",
     "Pivot",
@@ -238,6 +318,7 @@ WEB_EXPORT_COLS = [
     "SYMBOL",
     "SERIES",
     "NAME",
+    "Industry",
     "OPEN",
     "HIGH",
     "LOW",
@@ -318,19 +399,9 @@ def load_scan_result(date: str, output_dir: Optional[Path] = None) -> ScanResult
             full[col] = full[col].astype(str).str.lower().isin(["true", "1", "yes"])
     if "Bullish_CPR" not in full.columns:
         full = apply_bullish_cpr_filters(full)
+    full = keep_listed_equity(full)
+    full = attach_industry(full)
     _, narrow, bullish, bearish, top20 = split_shortlists(full)
-    narrow_path = output_dir / f"cpr_narrow_{date}.csv"
-    bull_path = output_dir / f"cpr_bullish_{date}.csv"
-    bear_path = output_dir / f"cpr_bearish_{date}.csv"
-    top_path = output_dir / f"cpr_top20_narrow_{date}.csv"
-    if narrow_path.exists():
-        narrow = pd.read_csv(narrow_path)
-    if bull_path.exists():
-        bullish = pd.read_csv(bull_path)
-    if bear_path.exists():
-        bearish = pd.read_csv(bear_path)
-    if top_path.exists():
-        top20 = pd.read_csv(top_path)
     fo_available = "Segment" in full.columns and bool((full["Segment"] == "F&O + Cash").any())
     return ScanResult(
         date=date,
@@ -350,7 +421,7 @@ def split_shortlists(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, pd.D
     narrow = df[df["CPR_Class"] == "Narrow"].sort_values("CPR_Width_Pct").reset_index(drop=True)
     bullish = df[df["Bullish_CPR"]].sort_values("CPR_Width_Pct").reset_index(drop=True)
     bearish = df[df["Bearish_CPR"]].sort_values("CPR_Width_Pct", ascending=False).reset_index(drop=True)
-    top_cols = [c for c in ["SYMBOL", "CLOSE", "CPR_Width_Pct", "Bias", "Price_Position", "Segment"] if c in narrow.columns]
+    top_cols = [c for c in ["SYMBOL", "Industry", "CLOSE", "CPR_Width_Pct", "Bias", "Price_Position", "Segment"] if c in narrow.columns]
     ranked = narrow[narrow["CPR_Width_Pct"] > 0] if "CPR_Width_Pct" in narrow.columns else narrow
     top20 = ranked.head(20)[top_cols].reset_index(drop=True) if not ranked.empty else pd.DataFrame(columns=top_cols)
     return full_table, narrow, bullish, bearish, top20
@@ -399,6 +470,7 @@ def scan_eod_cpr(date: str, output_dir: Optional[Path] = None, write_csv: bool =
             raise RuntimeError("Failed to download cash bhavcopy.")
         cash_df = normalize_bhavcopy(cash_raw, cash_only=True)
         print(f"Cash bhavcopy: {len(cash_raw)} rows → {len(cash_df)} EQ symbols")
+        cash_df = keep_listed_equity(cash_df)
 
         fo_raw = download_bhavcopy(FO_URL, date, session=session)
         fo_df = None
@@ -409,6 +481,7 @@ def scan_eod_cpr(date: str, output_dir: Optional[Path] = None, write_csv: bool =
             print("F&O bhavcopy not available (weekend/holiday?)")
 
         cash_df = tag_fo_symbols(cash_df, fo_df)
+        cash_df = attach_industry(cash_df, fetch=True)
         cash_df = compute_cpr(cash_df)
         cash_df = apply_bullish_cpr_filters(cash_df)
 
