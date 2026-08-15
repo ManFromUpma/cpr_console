@@ -1,0 +1,4 @@
+SYMBOL,Industry,CLOSE,CPR_Top,CPR_Bottom,CPR_Width_Pct,Width_Rank_Pct,Overlay,Setup,Bias,Segment,Confluence_Score,Regime
+COCKERILL,Unclassified,8578.5,8631.0,8596.0,0.4079967360261118,0.18333333333333332,Lower,Short,Bearish,Cash Only,-2,Risk Off
+BLUSPRING,Unclassified,111.07,111.945,111.36166666666665,0.5251943218991112,0.25,Lower,Short,Bearish,Cash Only,-2,Risk Off
+AQYLON,Unclassified,22.93,23.145,23.00166666666667,0.6250908562290923,0.25,Lower,Short,Bearish,Cash Only,-2,Risk Off

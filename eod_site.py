@@ -45,6 +45,10 @@ ROUND_2 = {
     "CPR_Bottom",
     "CPR_Top",
     "CPR_Width",
+    "ATR14",
+    "SMA50",
+    "SMA100",
+    "Next_Close",
 }
 TABLE_COLS = [
     "SYMBOL",
@@ -62,7 +66,19 @@ TABLE_COLS = [
     "Bias",
     "Price_Position",
     "Segment",
+    "Nifty500",
+    "History_Days",
+    "Value_60d",
+    "ATR14",
+    "Width_ATR",
+    "Value_Ratio",
+    "Above_SMA50",
+    "Above_SMA100",
+    "Regime",
+    "Confluence_Score",
     "Applies",
+    "Follow_Through",
+    "Next_Close",
 ]
 
 
@@ -86,7 +102,9 @@ def _records(df: pd.DataFrame) -> list:
                 rec[col] = round(float(val), 4)
             elif col == "Width_Rank_Pct":
                 rec[col] = round(float(val), 3)
-            elif col in ("Bullish_CPR", "Bearish_CPR", "Own_Narrow"):
+            elif col == "Value_Ratio":
+                rec[col] = round(float(val), 2)
+            elif col in ("Bullish_CPR", "Bearish_CPR", "Own_Narrow", "History_OK", "Above_SMA50", "Above_SMA100", "Nifty500"):
                 rec[col] = bool(val)
             else:
                 rec[col] = val
@@ -102,6 +120,8 @@ def _write_downloads(result: ScanResult, dest: Path) -> dict:
         "bullish": ("cpr_bullish.csv", result.bullish),
         "bearish": ("cpr_bearish.csv", result.bearish),
         "top20": ("cpr_top20_narrow.csv", result.top20),
+        "best": ("cpr_best.csv", result.best),
+        "watchlist": ("cpr_watchlist.csv", result.watchlist),
         "weekly": ("cpr_weekly.csv", result.weekly),
         "monthly": ("cpr_monthly.csv", result.monthly),
     }
@@ -139,6 +159,8 @@ def _write_downloads(result: ScanResult, dest: Path) -> dict:
         "bullish": "downloads/cpr_bullish.csv",
         "bearish": "downloads/cpr_bearish.csv",
         "top20": "downloads/cpr_top20_narrow.csv",
+        "best": "downloads/cpr_best.csv",
+        "watchlist": "downloads/cpr_watchlist.csv",
         "weekly": "downloads/cpr_weekly.csv",
         "monthly": "downloads/cpr_monthly.csv",
         "zip": f"downloads/{zip_name}",
@@ -151,9 +173,14 @@ def _payload(result: ScanResult, downloads: dict, dates: Iterable[str], home_hre
     if "Industry" in result.full.columns:
         industries = sorted(result.full["Industry"].dropna().astype(str).unique().tolist())
     own_n = int(result.full["Own_Narrow"].sum()) if "Own_Narrow" in result.full.columns else 0
-    setups = int(result.full["Setup"].isin(["Long", "Short", "Watch"]).sum()) if "Setup" in result.full.columns else 0
-    w_setups = int(result.weekly["Setup"].isin(["Long", "Short", "Watch"]).sum()) if not result.weekly.empty and "Setup" in result.weekly.columns else 0
-    m_setups = int(result.monthly["Setup"].isin(["Long", "Short", "Watch"]).sum()) if not result.monthly.empty and "Setup" in result.monthly.columns else 0
+    setups = int(result.full["Setup"].isin(["Long", "Short", "Watch Long", "Watch Short", "Watch"]).sum()) if "Setup" in result.full.columns else 0
+    w_setups = int(result.weekly["Setup"].isin(["Long", "Short", "Watch Long", "Watch Short", "Watch"]).sum()) if not result.weekly.empty and "Setup" in result.weekly.columns else 0
+    m_setups = int(result.monthly["Setup"].isin(["Long", "Short", "Watch Long", "Watch Short", "Watch"]).sum()) if not result.monthly.empty and "Setup" in result.monthly.columns else 0
+    regime = ""
+    if "Regime" in result.full.columns:
+        regimes = result.full["Regime"].dropna().astype(str)
+        if not regimes.empty:
+            regime = regimes.value_counts().idxmax()
     return {
         "date": result.date,
         "label": _date_label(result.date),
@@ -173,6 +200,7 @@ def _payload(result: ScanResult, downloads: dict, dates: Iterable[str], home_hre
             "setups": setups,
             "bullish": int(len(result.bullish)),
             "fo": fo_n,
+            "regime": regime,
         },
         "downloads": downloads,
         "tables": {
@@ -181,6 +209,9 @@ def _payload(result: ScanResult, downloads: dict, dates: Iterable[str], home_hre
             "bullish": _records(result.bullish),
             "bearish": _records(result.bearish),
             "top20": _records(result.top20),
+            "best": _records(result.best) if not result.best.empty else [],
+            "watchlist": _records(result.watchlist) if not result.watchlist.empty else [],
+            "follow": _records(result.follow_through) if not result.follow_through.empty else [],
             "weekly": _records(result.weekly) if not result.weekly.empty else [],
             "monthly": _records(result.monthly) if not result.monthly.empty else [],
         },
@@ -205,7 +236,7 @@ def _page_html(payload: dict, asset_prefix: str) -> str:
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <title>EOD CPR · {html.escape(payload["label"])}</title>
   <base href="{asset_prefix}">
-  <link rel="stylesheet" href="assets/style.css?v=5"/>
+  <link rel="stylesheet" href="assets/style.css?v=6"/>
 </head>
 <body>
   <header class="top">
@@ -238,21 +269,28 @@ def _page_html(payload: dict, asset_prefix: str) -> str:
     <select id="klass"><option value="Any">Any CPR class</option><option>Narrow</option><option>Moderate</option><option>Wide</option></select>
     <select id="bias"><option value="Any">Any bias</option><option>Bullish</option><option>Bearish</option><option>Neutral</option></select>
     <select id="overlay"><option value="Any">Any overlay</option><option>Higher</option><option>Lower</option><option>Inside</option><option>Outside</option><option>Overlapping</option></select>
-    <select id="setup"><option value="Any">Any setup</option><option>Long</option><option>Short</option><option>Watch</option><option>No setup</option></select>
+    <select id="setup"><option value="Any">Any setup</option><option>Long</option><option>Short</option><option>Watch Long</option><option>Watch Short</option><option>Watch</option><option>No setup</option></select>
     <select id="ownNarrow"><option value="Any">Own-narrow: any</option><option value="Yes">Own-narrow</option><option value="No">Not own-narrow</option></select>
+    <label class="filter-check"><input id="niftyOnly" type="checkbox"/> Nifty 500</label>
+    <label class="filter-check"><input id="hideUnclassified" type="checkbox"/> Hide Unclassified</label>
   </section>
   <p class="count" style="padding-top:0">
     CPR class is the band as % of close: Narrow ≤ 0.25%, Moderate 0.25–0.75%, Wide &gt; 0.75%.
     Own-narrow is that stock versus its own history (60 days, ~12 weeks, or completed months).
-    Daily Pivot / BC / TC are tomorrow’s levels. Use the Weekly / Monthly tabs to hold longer.
+    Setups require a ≥ 0.2% close beyond the band plus a Higher/Lower overlay, and Long / Short are
+    paused in a Risk-Off / Risk-On NIFTY regime. Daily Pivot / BC / TC are tomorrow’s levels.
+    Use the Weekly / Monthly tabs to hold longer.
   </p>
 
   <nav class="tabs" id="tabs">
-    <button data-tab="full" class="on">Full</button>
+    <button data-tab="best" class="on">Best today</button>
+    <button data-tab="full">Full</button>
     <button data-tab="narrow">Narrow</button>
     <button data-tab="bullish">Bullish</button>
     <button data-tab="bearish">Bearish</button>
     <button data-tab="top20">Top 20</button>
+    <button data-tab="watchlist">Watchlist</button>
+    <button data-tab="follow">Follow-through</button>
     <button data-tab="weekly">Weekly</button>
     <button data-tab="monthly">Monthly</button>
   </nav>
@@ -270,12 +308,16 @@ def _page_html(payload: dict, asset_prefix: str) -> str:
     Built from NSE UDI cash + F&amp;O bhavcopy plus ~252 prior cash sessions.
     CPR = Pivot (H+L+C)/3, BC (H+L)/2, TC 2P−BC.
     Absolute Narrow ≤ 0.25%. Own_Narrow = bottom 25% of that name’s last 60 widths.
-    Overlay = today’s CPR vs prior session. Setup = Own_Narrow + side + overlay.
+    Overlay = today’s CPR vs prior session. Setup = Own_Narrow + side + overlay +
+    a ≥ 0.2% close past the band; Long/Short pause when NIFTY regime opposes.
+    Watch Long / Watch Short = Own_Narrow + inside the band + bias.
+    Confluence_Score = Daily (Long +2 / Watch Long +1) + Weekly + Monthly signal (−6 … +6).
     Weekly / Monthly tabs use the same formulas on completed week and month bars.
-    Top 20 ranks liquid setups (VALUE ≥ ₹2 cr) by width percentile.
+    Top 20 ranks liquid setups (median VALUE ≥ ₹2 cr) by confluence then width percentile.
+    Follow-through compares each setup’s prior-day CPR band to this session’s close.
   </footer>
   <script>window.CPR_DATA = {data};</script>
-  <script src="assets/app.js?v=5"></script>
+  <script src="assets/app.js?v=6"></script>
 </body>
 </html>
 """
@@ -299,10 +341,11 @@ html, body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.
 .kicker { margin: 0; color: var(--accent); letter-spacing: .12em; text-transform: uppercase; font-size: 11px; }
 h1 { margin: 4px 0 0; font-size: 28px; font-weight: 650; }
 .date-nav, .filter-label { color: var(--muted); font-size: 12px; display: flex; flex-direction: column; gap: 6px; }
+.filter-check { color: var(--muted); font-size: 12px; display: flex; align-items: center; gap: 6px; padding: 8px 2px; }
 #industry { min-width: 220px; }
 select, input { background: var(--card); color: var(--text); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; }
 .banner { margin: 16px 24px; padding: 12px 14px; background: #18202a; border: 1px solid var(--line); border-radius: 10px; color: var(--muted); font-size: 13px; }
-.metrics { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 10px; padding: 0 24px 16px; }
+.metrics { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 10px; padding: 0 24px 16px; }
 .metric { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px; }
 .metric span { display: block; color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .08em; }
 .metric b { font-size: 22px; }
@@ -317,7 +360,10 @@ select, input { background: var(--card); color: var(--text); border: 1px solid v
 .count { padding: 8px 24px; color: var(--muted); font-size: 13px; }
 .table-wrap { padding: 0 24px 40px; overflow: auto; max-height: 70vh; }
 table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
-th { position: sticky; top: 0; background: #151b21; text-align: left; font-size: 11px; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); padding: 8px; border-bottom: 1px solid var(--line); }
+th { position: sticky; top: 0; background: #151b21; text-align: left; font-size: 11px; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); padding: 8px; border-bottom: 1px solid var(--line); cursor: pointer; }
+th.sorted { color: var(--text); }
+th.sorted.asc { box-shadow: inset 0 -2px 0 var(--accent); }
+th.sorted.desc { box-shadow: inset 0 2px 0 var(--accent); }
 td { padding: 7px 8px; border-bottom: 1px solid #232b33; }
 tr:hover td { background: #182028; }
 .bull { color: var(--bull); font-weight: 600; }
@@ -332,8 +378,10 @@ footer { padding: 12px 24px 32px; color: var(--muted); font-size: 12px; border-t
 
 JS = r"""
 const DATA = window.CPR_DATA;
-const COLS = ["SYMBOL","Industry","CLOSE","Pivot","BC","TC","CPR_Width_Pct","Width_Rank_Pct","CPR_Class","Own_Narrow","Overlay","Setup","Bias","Price_Position","Segment","Applies"];
-let tab = "full";
+const COLS = ["SYMBOL","Industry","CLOSE","Pivot","BC","TC","CPR_Width_Pct","Width_Rank_Pct","CPR_Class","Own_Narrow","Overlay","Setup","Bias","Price_Position","Segment","History_Days","Value_60d","ATR14","Width_ATR","Value_Ratio","Above_SMA50","Above_SMA100","Regime","Confluence_Score","Applies"];
+const FOLLOW_COLS = ["SYMBOL","Industry","Setup","CPR_Width_Pct","Width_Rank_Pct","Segment","Next_Close","Follow_Through"];
+let tab = "best";
+let sort = {col: null, asc: true};
 
 function $(id) { return document.getElementById(id); }
 
@@ -379,6 +427,7 @@ function metrics() {
     ["Setups", m.setups ?? "—"],
     ["Bullish CPR", m.bullish],
     ["F&O names", m.fo],
+    ["NIFTY regime", m.regime || "—"],
   ].map(([k,v]) => `<div class="metric"><span>${k}</span><b>${v}</b></div>`).join("");
 }
 
@@ -386,6 +435,8 @@ function downloads() {
   const d = DATA.downloads;
   $("downloads").innerHTML = [
     ["Full CSV", d.full],
+    ["Best today", d.best],
+    ["Watchlist", d.watchlist],
     ["Narrow", d.narrow],
     ["Bullish", d.bullish],
     ["Bearish", d.bearish],
@@ -393,15 +444,16 @@ function downloads() {
     ["Weekly", d.weekly],
     ["Monthly", d.monthly],
     ["All ZIP", d.zip],
-  ].map(([label, href], i) => href ? `<a class="${label==="All ZIP"?"zip":""}" href="${href}" download>${label}</a>` : "").join("");
+  ].map(([label, href]) => href ? `<a class="${label==="All ZIP"?"zip":""}" href="${href}" download>${label}</a>` : "").join("");
 }
 
 function fmt(col, val) {
   if (val === null || val === undefined) return "—";
   if (col === "CPR_Width_Pct") return Number(val).toFixed(4);
-  if (col === "Width_Rank_Pct") return Number(val).toFixed(2);
-  if (col === "Own_Narrow") return val ? "Yes" : "No";
-  if (["CLOSE","Pivot","BC","TC"].includes(col)) return Number(val).toFixed(2);
+  if (col === "Width_Rank_Pct" || col === "Confluence_Score") return Number(val).toFixed(2);
+  if (col === "Value_Ratio") return Number(val).toFixed(2);
+  if (["CLOSE","Pivot","BC","TC","Value_60d","ATR14","Width_ATR","Next_Close"].includes(col)) return Number(val).toFixed(2);
+  if (["Own_Narrow","Nifty500","Above_SMA50","Above_SMA100","History_OK"].includes(col)) return val ? "Yes" : "No";
   return val;
 }
 
@@ -413,11 +465,31 @@ function klass(col, val) {
   if (col === "CPR_Class" && val === "Narrow") return "narrow";
   if (col === "Overlay" && val === "Higher") return "bull";
   if (col === "Overlay" && val === "Lower") return "bear";
-  if (col === "Setup" && val === "Long") return "bull";
-  if (col === "Setup" && val === "Short") return "bear";
+  if (col === "Setup" && (val === "Long" || val === "Watch Long")) return "bull";
+  if (col === "Setup" && (val === "Short" || val === "Watch Short")) return "bear";
   if (col === "Setup" && val === "Watch") return "narrow";
   if (col === "Own_Narrow" && val === true) return "narrow";
+  if (col === "Follow_Through" && val === "Followed") return "bull";
+  if (col === "Follow_Through" && val === "Failed") return "bear";
   return "";
+}
+
+function parseFilters() {
+  try {
+    const q = new URLSearchParams(window.location.hash.slice(1));
+    const t = q.get("tab");
+    if (t && document.querySelector(`.tabs button[data-tab="${t}"]`)) {
+      document.querySelectorAll(".tabs button").forEach(b => b.classList.remove("on"));
+      document.querySelector(`.tabs button[data-tab="${t}"]`).classList.add("on");
+      tab = t;
+    }
+    const sel = (id, name) => { const v = q.get(name); if (v) $(id).value = v; };
+    sel("search","q"); sel("segment","seg"); sel("industry","ind");
+    sel("klass","cls"); sel("bias","bias"); sel("overlay","ovl");
+    sel("setup","setup"); sel("ownNarrow","nn");
+    if (q.get("nifty") === "1") $("niftyOnly").checked = true;
+    if (q.get("hide") === "1") $("hideUnclassified").checked = true;
+  } catch (e) {}
 }
 
 function rows() {
@@ -426,11 +498,13 @@ function rows() {
   const industry = $("industry").value;
   const klassv = $("klass").value;
   const bias = $("bias").value;
-  const overlay = $("overlay") ? $("overlay").value : "Any";
-  const setup = $("setup") ? $("setup").value : "Any";
-  const ownNarrow = $("ownNarrow") ? $("ownNarrow").value : "Any";
+  const overlay = $("overlay").value;
+  const setup = $("setup").value;
+  const ownNarrow = $("ownNarrow").value;
+  const niftyOnly = $("niftyOnly").checked;
+  const hideUncl = $("hideUnclassified").checked;
   return (DATA.tables[tab] || []).filter(r => {
-    if (q && !(String(r.SYMBOL || "").includes(q))) return false;
+    if (q && !(String(r.SYMBOL || "").toUpperCase().includes(q))) return false;
     if (segment !== "Any" && r.Segment !== segment) return false;
     if (industry !== "Any" && r.Industry !== industry) return false;
     if (klassv !== "Any" && r.CPR_Class !== klassv) return false;
@@ -439,21 +513,67 @@ function rows() {
     if (setup !== "Any" && r.Setup !== setup) return false;
     if (ownNarrow === "Yes" && !r.Own_Narrow) return false;
     if (ownNarrow === "No" && r.Own_Narrow) return false;
+    if (niftyOnly && r.Nifty500 !== true) return false;
+    if (hideUncl && r.Industry === "Unclassified") return false;
     return true;
   });
 }
 
+function sortRows(data) {
+  if (!sort.col) return data;
+  const col = sort.col;
+  const dir = sort.asc ? 1 : -1;
+  return data.slice().sort((a, b) => {
+    const va = a[col], vb = b[col];
+    if (va == null) return 1;
+    if (vb == null) return -1;
+    if (typeof va === "number" && typeof vb === "number") return (va - vb) * dir;
+    return String(va).localeCompare(String(vb)) * dir;
+  });
+}
+
 function render() {
-  const data = rows();
+  const data = sortRows(rows());
   const htf = DATA.htf || {};
   let extra = "";
   if (tab === "weekly" && htf.weekly_applies) extra = ` · applies to ${htf.weekly_applies}`;
   if (tab === "monthly" && htf.monthly_applies) extra = ` · applies to ${htf.monthly_applies}`;
+  if (tab === "follow") extra = " · prior-day setups vs this session's close";
+  if (tab === "watchlist") extra = " · every setup with levels to trade next session";
+  if (tab === "best") extra = " · Daily Long/Short ranked by confluence, liquid, F&O first";
   $("count").textContent = `${data.length} rows${extra}`;
-  $("head").innerHTML = "<tr>" + COLS.map(c => `<th>${c.replaceAll("_"," ")}</th>`).join("") + "</tr>";
+  const cols = tab === "follow" ? FOLLOW_COLS : COLS;
+  $("head").innerHTML = "<tr>" + cols.map(c =>
+    `<th data-col="${c}" class="${sort.col===c?(sort.asc?'sorted asc':'sorted desc'):''}">${c.replaceAll("_"," ")}${sort.col===c?(sort.asc?' ▲':' ▼'):''}</th>`
+  ).join("") + "</tr>";
   $("body").innerHTML = data.map(r =>
-    "<tr>" + COLS.map(c => `<td class="${klass(c, r[c])}">${fmt(c, r[c])}</td>`).join("") + "</tr>"
+    "<tr>" + cols.map(c => `<td class="${klass(c, r[c])}">${fmt(c, r[c])}</td>`).join("") + "</tr>"
   ).join("");
+  document.querySelectorAll("th").forEach(th => th.addEventListener("click", () => {
+    const col = th.dataset.col;
+    if (sort.col === col) sort.asc = !sort.asc; else { sort.col = col; sort.asc = true; }
+    render();
+  }));
+  syncUrl();
+}
+
+function syncUrl() {
+  const p = new URLSearchParams();
+  if (tab !== "best") p.set("tab", tab);
+  if ($("search").value) p.set("q", $("search").value);
+  if ($("segment").value !== "Any") p.set("seg", $("segment").value);
+  if ($("industry").value !== "Any") p.set("ind", $("industry").value);
+  if ($("klass").value !== "Any") p.set("cls", $("klass").value);
+  if ($("bias").value !== "Any") p.set("bias", $("bias").value);
+  if ($("overlay").value !== "Any") p.set("ovl", $("overlay").value);
+  if ($("setup").value !== "Any") p.set("setup", $("setup").value);
+  if ($("ownNarrow").value !== "Any") p.set("nn", $("ownNarrow").value);
+  if ($("niftyOnly").checked) p.set("nifty", "1");
+  if ($("hideUnclassified").checked) p.set("hide", "1");
+  const h = p.toString();
+  if (window.location.hash !== "#" + h) {
+    history.replaceState(null, "", "#" + h);
+  }
 }
 
 document.querySelectorAll(".tabs button").forEach(btn => {
@@ -468,6 +588,11 @@ document.querySelectorAll(".tabs button").forEach(btn => {
   const el = $(id);
   if (el) el.addEventListener("input", render);
 });
+["niftyOnly","hideUnclassified"].forEach(id => {
+  const el = $(id);
+  if (el) el.addEventListener("change", render);
+});
+parseFilters();
 fillDates();
 fillIndustry();
 metrics();
@@ -503,8 +628,9 @@ def build_site(output_dir: Path = Path("cpr_output"), site_dir: Path = SITE_DIR)
     _write_assets(site_dir)
 
     latest = dates[0]
-    for date in dates:
-        result = load_scan_result(date, output_dir=output_dir)
+    for i, date in enumerate(dates):
+        prev = dates[i + 1] if i + 1 < len(dates) else None
+        result = load_scan_result(date, output_dir=output_dir, previous=prev)
         if date == latest and result.weekly.empty:
             result = attach_htf_to_result(result, output_dir=output_dir, write_csv=True)
         if date == latest:

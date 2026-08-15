@@ -75,10 +75,17 @@ INDUSTRY_CACHE = Path(__file__).resolve().parent / "universes" / "nifty500_indus
 HISTORY_LOOKBACK = 60
 HISTORY_LOOKBACK_HTF = 252
 OWN_NARROW_QUANTILE = 0.25
-MIN_HISTORY_DAYS = 10
-MIN_HISTORY_WEEKS = 8
-MIN_HISTORY_MONTHS = 4
+MIN_HISTORY_DAYS = 20
+MIN_HISTORY_WEEKS = 12
+MIN_HISTORY_MONTHS = 6
 MIN_VALUE_TOP20 = 20_000_000
+BEARISH_WIDTH_PCT = 0.25
+SETUP_CUSHION_PCT = 0.20
+ATR_PERIOD = 14
+SMA_FAST = 50
+SMA_SLOW = 100
+MARKET_SYMBOL = "NIFTY"
+WATCHLIST_SETUPS = ("Long", "Short", "Watch Long", "Watch Short", "Watch")
 BHAVCOPY_SLIM_COLS = ["SYMBOL", "SERIES", "NAME", "OPEN", "HIGH", "LOW", "CLOSE", "VOLUME", "VALUE"]
 
 # ETFs, AMC schemes, index funds, gilt/liquid products listed as EQ.
@@ -104,6 +111,9 @@ class ScanResult:
     monthly: pd.DataFrame = field(default_factory=pd.DataFrame)
     weekly_applies: str = ""
     monthly_applies: str = ""
+    best: pd.DataFrame = field(default_factory=pd.DataFrame)
+    watchlist: pd.DataFrame = field(default_factory=pd.DataFrame)
+    follow_through: pd.DataFrame = field(default_factory=pd.DataFrame)
 
 
 def _nse_session() -> requests.Session:
@@ -239,6 +249,7 @@ def attach_industry(df: pd.DataFrame, mapping: Optional[dict] = None, fetch: boo
     out = df.copy()
     mapping = mapping if mapping is not None else load_industry_map(fetch=fetch)
     out["Industry"] = out["SYMBOL"].map(mapping).fillna(UNCLASSIFIED_INDUSTRY)
+    out["Nifty500"] = out["Industry"] != UNCLASSIFIED_INDUSTRY
     return out
 
 
@@ -444,6 +455,160 @@ def backfill_cached_scans(
     return dates
 
 
+def backfill_htf_scans(
+    end_date: str,
+    output_dir: Optional[Path] = None,
+    lookback: int = HISTORY_LOOKBACK_HTF,
+) -> List[str]:
+    """Write cpr_weekly_* / cpr_monthly_*.csv for every archived daily session.
+
+    Aggregates the daily cache to week/month bars once, then per archived session
+    replays the completed-period logic so every archive page gets HTF tabs.
+    """
+    output_dir = Path(output_dir) if output_dir is not None else OUTPUT_DIR
+    dates = cached_history_dates(end_date, output_dir, lookback)
+    if len(dates) < 5:
+        return []
+    panel = load_history_panel(dates, output_dir)
+    if panel.empty:
+        return []
+    weekly_bars = aggregate_htf_bars(panel, "W-FRI")
+    monthly_bars = aggregate_htf_bars(panel, "M")
+    written: List[str] = []
+    for date in dates:
+        full_path = output_dir / f"cpr_full_{date}.csv"
+        if not full_path.exists():
+            continue
+        for freq, bars, min_hist, suffix in (
+            ("W-FRI", weekly_bars, MIN_HISTORY_WEEKS, "weekly"),
+            ("M", monthly_bars, MIN_HISTORY_MONTHS, "monthly"),
+        ):
+            out_path = output_dir / f"cpr_{suffix}_{date}.csv"
+            if out_path.exists() and out_path.stat().st_size:
+                continue
+            if bars.empty:
+                continue
+            complete_end = last_complete_period_end(date, freq)
+            hist = bars[bars["session"] <= complete_end]
+            if hist.empty or hist["session"].nunique() < min_hist:
+                continue
+            hist = apply_bullish_cpr_filters(hist)
+            f = attach_history_features(hist, hist, min_history=min_hist)
+            latest = f["session"].max()
+            frame = f[f["session"] == latest].copy()
+            if frame.empty:
+                continue
+            frame["Applies"] = htf_applies_label(str(latest), freq)
+            frame["Timeframe"] = "Weekly" if freq.startswith("W") else "Monthly"
+            frame.to_csv(out_path, index=False)
+            written.append(out_path.stem.split("_")[-2] + f"_{suffix}")
+    if written:
+        print(f"HTF archive: wrote {len(written)} week/month CSVs")
+    return written
+
+
+def market_regime(history_df: pd.DataFrame, symbol: str = MARKET_SYMBOL) -> str:
+    """Market regime from the cached panel.
+
+    Prefers a named index (NIFTY): Risk On when the index closed above its prior
+    session's CPR top, Risk Off below the prior bottom. When the index row is not
+    present in the cash bhavcopy (indices are not equities), falls back to breadth:
+    if more than half the panel closed above their prior CPR top → Risk On; more
+    than half below their prior bottom → Risk Off; otherwise Neutral.
+    """
+    if history_df is None or history_df.empty:
+        return "Unknown"
+    if "CLOSE" in history_df.columns and "CPR_Top" not in history_df.columns:
+        return "Unknown"
+    mkt = history_df[history_df["SYMBOL"] == symbol].sort_values("session")
+    if len(mkt) >= 2 and "CPR_Top" in mkt.columns:
+        last = mkt.iloc[-1]
+        prev = mkt.iloc[-2]
+        if not (pd.isna(last["CLOSE"]) or pd.isna(prev["CPR_Top"]) or pd.isna(prev["CPR_Bottom"])):
+            if float(last["CLOSE"]) > float(prev["CPR_Top"]):
+                return "Risk On"
+            if float(last["CLOSE"]) < float(prev["CPR_Bottom"]):
+                return "Risk Off"
+            return "Neutral"
+
+    h = history_df.dropna(subset=["SYMBOL", "session", "CLOSE", "CPR_Top", "CPR_Bottom"])
+    if h.empty:
+        return "Unknown"
+    h = h.sort_values(["SYMBOL", "session"])
+    h["prior_top"] = h.groupby("SYMBOL")["CPR_Top"].shift(1)
+    h["prior_bot"] = h.groupby("SYMBOL")["CPR_Bottom"].shift(1)
+    latest = h["session"].max()
+    day = h[h["session"] == latest].copy()
+    day = day.dropna(subset=["prior_top", "prior_bot"])
+    if day.empty:
+        return "Unknown"
+    up = (day["CLOSE"] > day["prior_top"]).mean()
+    dn = (day["CLOSE"] < day["prior_bot"]).mean()
+    if up >= 0.5 and up > dn:
+        return "Risk On"
+    if dn >= 0.5 and dn > up:
+        return "Risk Off"
+    return "Neutral"
+
+
+def attached_history_features(
+    hist: pd.DataFrame,
+    own_window: Optional[int],
+    min_history: int,
+) -> pd.DataFrame:
+    """Per-symbol rolling history features from a bhavcopy panel.
+
+    Technical series (ATR14 / SMA50 / SMA100) use every completed bar in the panel;
+    the width rank and 60-day median turnover use `own_window` (the last N sessions)
+    when provided. Returns the latest session's features keyed by SYMBOL.
+    """
+    h = hist.copy()
+    h["SYMBOL"] = h["SYMBOL"].astype(str).str.strip().str.upper()
+    h = h.sort_values(["SYMBOL", "session"])
+    full = h
+    if own_window:
+        h = h.groupby("SYMBOL", sort=False).tail(own_window)
+    h["prior_top"] = h.groupby("SYMBOL")["CPR_Top"].shift(1)
+    h["prior_bot"] = h.groupby("SYMBOL")["CPR_Bottom"].shift(1)
+    h["Width_Rank_Pct"] = h.groupby("SYMBOL")["CPR_Width_Pct"].rank(method="average", pct=True)
+    h["History_Days"] = h.groupby("SYMBOL")["session"].transform("count")
+    if "VALUE" in h.columns:
+        h["VALUE"] = pd.to_numeric(h["VALUE"], errors="coerce")
+        h["Value_60d"] = h.groupby("SYMBOL")["VALUE"].transform("median")
+    else:
+        h["Value_60d"] = np.nan
+
+    tech = full.dropna(subset=["HIGH", "LOW", "CLOSE"]).copy()
+    tech["prev_close"] = tech.groupby("SYMBOL")["CLOSE"].shift(1)
+    tech["TR"] = np.maximum(
+        tech["HIGH"] - tech["LOW"],
+        np.maximum(
+            (tech["HIGH"] - tech["prev_close"]).abs(),
+            (tech["LOW"] - tech["prev_close"]).abs(),
+        ),
+    )
+    tech["ATR14"] = tech.groupby("SYMBOL")["TR"].transform(
+        lambda s: s.rolling(ATR_PERIOD, min_periods=ATR_PERIOD).mean()
+    )
+    tech["SMA50"] = tech.groupby("SYMBOL")["CLOSE"].transform(
+        lambda s: s.rolling(SMA_FAST, min_periods=SMA_FAST).mean()
+    )
+    tech["SMA100"] = tech.groupby("SYMBOL")["CLOSE"].transform(
+        lambda s: s.rolling(SMA_SLOW, min_periods=SMA_SLOW).mean()
+    )
+    tech_latest = tech[tech["session"] == tech["session"].max()]
+    tech_latest = tech_latest.set_index("SYMBOL")[["ATR14", "SMA50", "SMA100"]]
+
+    latest = h["session"].max()
+    today = h[h["session"] == latest][
+        ["SYMBOL", "prior_top", "prior_bot", "Width_Rank_Pct", "History_Days", "Value_60d"]
+    ]
+    today = today.set_index("SYMBOL")
+    if tech_latest.empty:
+        return today, pd.DataFrame()
+    return today, tech_latest
+
+
 def attach_history_features(
     scan_df: pd.DataFrame,
     history_df: pd.DataFrame,
@@ -457,6 +622,9 @@ def attach_history_features(
     recent N sessions per symbol. Daily scans pass HISTORY_LOOKBACK (60) even when
     the cache holds ~252 sessions; weekly / monthly HTF bars leave it None so the
     rank and history counts use every completed bar in the cache.
+
+    Technical context (ATR14 / Width_ATR / Value_Ratio / Above_SMA50/100) always
+    uses the full cached panel so 50/100-session moving averages are meaningful.
     """
     out = scan_df.copy()
     if history_df is None or history_df.empty or "SYMBOL" not in history_df.columns:
@@ -464,53 +632,95 @@ def attach_history_features(
         out["Width_Rank_Pct"] = np.nan
         out["Own_Narrow"] = False
         out["History_Days"] = 0
+        out["History_OK"] = False
         out["Value_60d"] = np.nan
+        out["ATR14"] = np.nan
+        out["Width_ATR"] = np.nan
+        out["Value_Ratio"] = np.nan
+        out["Above_SMA50"] = False
+        out["Above_SMA100"] = False
+        out["Regime"] = "Unknown"
         out["Setup"] = "No setup"
         return out
 
     hist = history_df.copy()
     hist["SYMBOL"] = hist["SYMBOL"].astype(str).str.strip().str.upper()
     hist = hist.sort_values(["SYMBOL", "session"])
-    if own_window:
-        hist = hist.groupby("SYMBOL", sort=False).tail(own_window)
-    hist["prior_top"] = hist.groupby("SYMBOL")["CPR_Top"].shift(1)
-    hist["prior_bot"] = hist.groupby("SYMBOL")["CPR_Bottom"].shift(1)
-    hist["Width_Rank_Pct"] = hist.groupby("SYMBOL")["CPR_Width_Pct"].rank(method="average", pct=True)
-    hist["History_Days"] = hist.groupby("SYMBOL")["session"].transform("count")
-    if "VALUE" in hist.columns:
-        hist["VALUE"] = pd.to_numeric(hist["VALUE"], errors="coerce")
-        hist["Value_60d"] = hist.groupby("SYMBOL")["VALUE"].transform("median")
-    else:
-        hist["Value_60d"] = np.nan
+    today, tech = attached_history_features(hist, own_window, min_history)
 
     latest = hist["session"].max()
-    today = hist[hist["session"] == latest][
-        ["SYMBOL", "prior_top", "prior_bot", "Width_Rank_Pct", "History_Days", "Value_60d"]
-    ]
+    regime = market_regime(hist)
+
     out["SYMBOL"] = out["SYMBOL"].astype(str).str.strip().str.upper()
-    out = out.drop(columns=["Overlay", "Width_Rank_Pct", "Own_Narrow", "History_Days", "Value_60d", "Setup"], errors="ignore")
-    out = out.merge(today, on="SYMBOL", how="left")
+    drop_cols = [
+        "Overlay", "Width_Rank_Pct", "Own_Narrow", "History_Days", "History_OK",
+        "Value_60d", "ATR14", "Width_ATR", "Value_Ratio", "Above_SMA50",
+        "Above_SMA100", "Regime", "Setup",
+    ]
+    out = out.drop(columns=drop_cols, errors="ignore")
+    out = out.merge(today.reset_index(), on="SYMBOL", how="left")
     out["Overlay"] = [
         cpr_overlay(t, b, pt, pb)
         for t, b, pt, pb in zip(out["CPR_Top"], out["CPR_Bottom"], out["prior_top"], out["prior_bot"])
     ]
     out["Width_Rank_Pct"] = pd.to_numeric(out["Width_Rank_Pct"], errors="coerce")
     out["History_Days"] = pd.to_numeric(out["History_Days"], errors="coerce").fillna(0).astype(int)
+    out["History_OK"] = out["History_Days"] >= min_history
+    out["Regime"] = regime
     out["Own_Narrow"] = (
         (out["Width_Rank_Pct"] <= own_narrow_q)
-        & (out["History_Days"] >= min_history)
+        & (out["History_OK"])
         & (pd.to_numeric(out["CPR_Width_Pct"], errors="coerce") > 0)
     ).fillna(False).astype(bool)
+
+    if not tech.empty:
+        out = out.merge(tech.reset_index(), on="SYMBOL", how="left")
+    for col in ("ATR14", "SMA50", "SMA100"):
+        if col not in out.columns:
+            out[col] = np.nan
+        out[col] = pd.to_numeric(out[col], errors="coerce")
+    out["Width_ATR"] = out["CPR_Width"] / out["ATR14"]
+    if "VALUE" in out.columns:
+        value_today = pd.to_numeric(out["VALUE"], errors="coerce")
+    else:
+        value_today = np.nan
+    close = pd.to_numeric(out["CLOSE"], errors="coerce")
+    out["Value_Ratio"] = value_today / out["Value_60d"]
+    out["Above_SMA50"] = close > out["SMA50"]
+    out["Above_SMA100"] = close > out["SMA100"]
+
     above = out["Price_Position"] == "Above CPR"
     below = out["Price_Position"] == "Below CPR"
     inside = out["Price_Position"] == "Inside CPR"
+    bull = out["Bias"] == "Bullish"
+    bear = out["Bias"] == "Bearish"
+    neutral = out["Bias"] == "Neutral"
+    long_ok = (
+        above
+        & bull
+        & (out["Overlay"] == "Higher")
+        & ((close - out["CPR_Top"]) / close * 100 >= SETUP_CUSHION_PCT)
+    )
+    short_ok = (
+        below
+        & bear
+        & (out["Overlay"] == "Lower")
+        & ((out["CPR_Bottom"] - close) / close * 100 >= SETUP_CUSHION_PCT)
+    )
+    long_ok &= out["Regime"] != "Risk Off"
+    short_ok &= out["Regime"] != "Risk On"
+    own = out["Own_Narrow"].astype(bool)
     out["Setup"] = np.where(
-        out["Own_Narrow"] & above & (out["Overlay"] == "Higher"),
+        own & long_ok,
         "Long",
         np.where(
-            out["Own_Narrow"] & below & (out["Overlay"] == "Lower"),
+            own & short_ok,
             "Short",
-            np.where(out["Own_Narrow"] & inside, "Watch", "No setup"),
+            np.where(
+                own & inside & bull,
+                "Watch Long",
+                np.where(own & inside & bear, "Watch Short", np.where(own & inside & neutral, "Watch", "No setup")),
+            ),
         ),
     )
     return out.drop(columns=["prior_top", "prior_bot"], errors="ignore")
@@ -595,7 +805,54 @@ def build_htf_frame(
     label = htf_applies_label(str(latest), freq)
     frame["Applies"] = label
     frame["Timeframe"] = "Weekly" if freq.startswith("W") else "Monthly"
+    if "Setup" in frame.columns:
+        frame["Daily_Signal"] = 0
+        frame["Weekly_Signal"] = frame["Setup"].map(setup_signal).fillna(0).astype(int)
+        frame["Monthly_Signal"] = 0
+        frame["Confluence_Score"] = frame["Weekly_Signal" if freq.startswith("W") else "Monthly_Signal"]
     return frame.reset_index(drop=True), label
+
+
+def _signal_map(frame: pd.DataFrame) -> dict:
+    """SYMBOL → signed direction from a Daily/Weekly/Monthly setup list."""
+    if frame.empty or "Setup" not in frame.columns:
+        return {}
+    dirs = {"Long": 2, "Watch Long": 1, "Short": -2, "Watch Short": -1}
+    return {
+        sym: dirs.get(s, 0)
+        for sym, s in zip(frame["SYMBOL"].astype(str).str.upper(), frame["Setup"])
+    }
+
+
+def setup_signal(setup: str) -> int:
+    dirs = {"Long": 2, "Watch Long": 1, "Short": -2, "Watch Short": -1}
+    return dirs.get(setup, 0)
+
+
+def attach_confluence(
+    daily: pd.DataFrame,
+    weekly: pd.DataFrame,
+    monthly: pd.DataFrame,
+) -> pd.DataFrame:
+    """Add Daily/Weekly/Monthly_signal and signed Confluence_Score to the daily frame.
+
+    Signals are directional: Long +2, Watch Long +1, Short −2, Watch Short −1,
+    Watch / No setup 0. Confluence_Score sums the three timeframes (−6 … +6);
+    the sign is the net direction and the magnitude the breadth of agreement.
+    """
+    out = daily.copy()
+    out["SYMBOL"] = out["SYMBOL"].astype(str).str.strip().str.upper()
+    if "Setup" not in out.columns:
+        out["Setup"] = "No setup"
+    out["Daily_Signal"] = out["Setup"].map(setup_signal).fillna(0).astype(int)
+    w_map = _signal_map(weekly)
+    m_map = _signal_map(monthly)
+    out["Weekly_Signal"] = out["SYMBOL"].map(w_map).fillna(0).astype(int)
+    out["Monthly_Signal"] = out["SYMBOL"].map(m_map).fillna(0).astype(int)
+    out["Confluence_Score"] = (
+        out["Daily_Signal"] + out["Weekly_Signal"] + out["Monthly_Signal"]
+    )
+    return out
 
 
 def attach_htf_to_result(result: ScanResult, output_dir: Optional[Path] = None, write_csv: bool = True) -> ScanResult:
@@ -613,6 +870,13 @@ def attach_htf_to_result(result: ScanResult, output_dir: Optional[Path] = None, 
     result.monthly = monthly
     result.weekly_applies = w_label
     result.monthly_applies = m_label
+    result.full = attach_confluence(result.full, weekly, monthly)
+    if write_csv and "Confluence_Score" in result.full.columns:
+        result = export_results(result.full, result.date, output_dir=output_dir, verbose=False)
+        result.weekly = weekly
+        result.monthly = monthly
+        result.weekly_applies = w_label
+        result.monthly_applies = m_label
     if write_csv:
         output_dir.mkdir(exist_ok=True)
         if not weekly.empty:
@@ -691,7 +955,11 @@ def apply_bullish_cpr_filters(df: pd.DataFrame) -> pd.DataFrame:
         & (out["Pivot"] > out["BC"])
         & (out["CPR_Width_Pct"] < 0.25)
     )
-    out["Bearish_CPR"] = (out["CLOSE"] < out["CPR_Bottom"]) & (out["Pivot"] < out["BC"])
+    out["Bearish_CPR"] = (
+        (out["CLOSE"] < out["CPR_Bottom"])
+        & (out["Pivot"] < out["BC"])
+        & (out["CPR_Width_Pct"] < BEARISH_WIDTH_PCT)
+    )
     return out
 
 
@@ -716,10 +984,24 @@ DISPLAY_COLS = [
     "Bias",
     "Price_Position",
     "Segment",
+    "Nifty500",
     "History_Days",
+    "History_OK",
+    "Value_60d",
+    "ATR14",
+    "Width_ATR",
+    "Value_Ratio",
+    "Above_SMA50",
+    "Above_SMA100",
+    "Regime",
     "Applies",
+    "Timeframe",
     "Bullish_CPR",
     "Bearish_CPR",
+    "Daily_Signal",
+    "Weekly_Signal",
+    "Monthly_Signal",
+    "Confluence_Score",
 ]
 
 WEB_EXPORT_COLS = [
@@ -748,12 +1030,26 @@ WEB_EXPORT_COLS = [
     "Bias",
     "Price_Position",
     "Segment",
+    "Nifty500",
     "History_Days",
+    "History_OK",
     "Value_60d",
+    "ATR14",
+    "Width_ATR",
+    "Value_Ratio",
+    "Above_SMA50",
+    "Above_SMA100",
+    "Regime",
     "Applies",
     "Timeframe",
     "Bullish_CPR",
     "Bearish_CPR",
+    "Daily_Signal",
+    "Weekly_Signal",
+    "Monthly_Signal",
+    "Confluence_Score",
+    "Next_Close",
+    "Follow_Through",
 ]
 
 
@@ -804,14 +1100,18 @@ def discover_scan_dates(output_dir: Optional[Path] = None) -> List[str]:
     return dates
 
 
-def load_scan_result(date: str, output_dir: Optional[Path] = None) -> ScanResult:
-    """Rebuild a ScanResult from previously exported CSVs."""
+def load_scan_result(date: str, output_dir: Optional[Path] = None, previous: Optional[str] = None) -> ScanResult:
+    """Rebuild a ScanResult from previously exported CSVs.
+
+    Previous session's date is used for the follow-through tab; pass it explicitly
+    (e.g. from discover_scan_dates) so large archives do not re-glob per date.
+    """
     output_dir = Path(output_dir) if output_dir is not None else OUTPUT_DIR
     full_path = output_dir / f"cpr_full_{date}.csv"
     if not full_path.exists():
         raise FileNotFoundError(f"Missing {full_path}")
     full = pd.read_csv(full_path)
-    for col in ("Bullish_CPR", "Bearish_CPR", "Own_Narrow"):
+    for col in ("Bullish_CPR", "Bearish_CPR", "Own_Narrow", "History_OK", "Above_SMA50", "Above_SMA100", "Nifty500"):
         if col in full.columns:
             full[col] = full[col].astype(str).str.lower().isin(["true", "1", "yes"])
     if "Bullish_CPR" not in full.columns:
@@ -828,6 +1128,18 @@ def load_scan_result(date: str, output_dir: Optional[Path] = None) -> ScanResult
             )
     _, narrow, bullish, bearish, top20 = split_shortlists(full)
     fo_available = "Segment" in full.columns and bool((full["Segment"] == "F&O + Cash").any())
+    best = pd.DataFrame()
+    watchlist = pd.DataFrame()
+    best_path = output_dir / f"cpr_best_{date}.csv"
+    watch_path = output_dir / f"cpr_watchlist_{date}.csv"
+    if best_path.exists():
+        best = pd.read_csv(best_path)
+    if best.empty:
+        best = compute_best(full)
+    if watch_path.exists():
+        watchlist = pd.read_csv(watch_path)
+    if watchlist.empty:
+        watchlist = compute_watchlist(full)
     result = ScanResult(
         date=date,
         cash_rows=len(full),
@@ -838,6 +1150,8 @@ def load_scan_result(date: str, output_dir: Optional[Path] = None) -> ScanResult
         bearish=bearish,
         top20=top20,
         output_dir=output_dir,
+        best=best,
+        watchlist=watchlist,
     )
     weekly_path = output_dir / f"cpr_weekly_{date}.csv"
     monthly_path = output_dir / f"cpr_monthly_{date}.csv"
@@ -849,21 +1163,157 @@ def load_scan_result(date: str, output_dir: Optional[Path] = None) -> ScanResult
         result.monthly = pd.read_csv(monthly_path)
         if "Applies" in result.monthly.columns and not result.monthly.empty:
             result.monthly_applies = str(result.monthly["Applies"].iloc[0])
+    previous = previous or [d for d in discover_scan_dates(output_dir) if d < date]
+    if previous and isinstance(previous, list):
+        previous = previous[0] if previous else None
+    if previous:
+        prev_path = output_dir / f"cpr_full_{previous}.csv"
+        if prev_path.exists() and "Setup" in result.full.columns:
+            prev_full = pd.read_csv(prev_path)
+            try:
+                result.follow_through = follow_through(prev_full, result.full)
+            except Exception:
+                result.follow_through = pd.DataFrame()
     return result
 
 
 def _liquid_enough(df: pd.DataFrame) -> pd.Series:
-    if "VALUE" in df.columns:
-        value = pd.to_numeric(df["VALUE"], errors="coerce")
+    """Median turnover over the last ~60 sessions, not the single session's VALUE spike."""
+    if "Value_60d" in df.columns:
+        value = pd.to_numeric(df["Value_60d"], errors="coerce")
         if value.notna().any():
             return value >= MIN_VALUE_TOP20
-    if "Value_60d" in df.columns:
-        return pd.to_numeric(df["Value_60d"], errors="coerce") >= MIN_VALUE_TOP20
     return pd.Series(True, index=df.index)
 
 
+def compute_best(df: pd.DataFrame, n: int = 25) -> pd.DataFrame:
+    """'Best today' — active Long/Short daily setups, ranked by |confluence| (multi-TF
+    agreement) preferring F&O names, liquid by median turnover."""
+    cols = [
+        c
+        for c in [
+            "SYMBOL",
+            "Industry",
+            "CLOSE",
+            "CPR_Top",
+            "CPR_Bottom",
+            "CPR_Width_Pct",
+            "Width_Rank_Pct",
+            "Overlay",
+            "Setup",
+            "Bias",
+            "Segment",
+            "Confluence_Score",
+            "Regime",
+        ]
+        if c in df.columns
+    ]
+    if "Setup" not in df.columns:
+        return pd.DataFrame(columns=cols)
+    setup_rows = df[df["Setup"].isin(["Long", "Short"])].copy()
+    if setup_rows.empty:
+        return pd.DataFrame(columns=cols)
+    liquid = _liquid_enough(setup_rows).reindex(setup_rows.index).fillna(False)
+    setup_rows = setup_rows.loc[liquid]
+    if setup_rows.empty:
+        return pd.DataFrame(columns=cols)
+    sort_by = "Confluence_Score" if "Confluence_Score" in setup_rows.columns else "Width_Rank_Pct"
+    extra = []
+    if sort_by in setup_rows.columns:
+        setup_rows["_key"] = setup_rows[sort_by].abs()
+        setup_rows["_fo"] = setup_rows.get("Segment", pd.Series(False, index=setup_rows.index)) == "F&O + Cash"
+        setup_rows = setup_rows.sort_values(["_key", "_fo"], ascending=[False, False], na_position="last")
+        extra = ["_key", "_fo"]
+    best = setup_rows.head(n)[cols + extra]
+    return best.drop(columns=extra, errors="ignore").reset_index(drop=True)
+
+
+def compute_watchlist(df: pd.DataFrame) -> pd.DataFrame:
+    """Weekend watchlist — every setup name with the levels to trade next session."""
+    cols = [
+        c
+        for c in [
+            "SYMBOL",
+            "Industry",
+            "CLOSE",
+            "Pivot",
+            "BC",
+            "TC",
+            "CPR_Top",
+            "CPR_Bottom",
+            "CPR_Width_Pct",
+            "Width_Rank_Pct",
+            "Overlay",
+            "Setup",
+            "Bias",
+            "Price_Position",
+            "Segment",
+            "Confluence_Score",
+            "Regime",
+        ]
+        if c in df.columns
+    ]
+    if "Setup" not in df.columns:
+        return pd.DataFrame(columns=cols)
+    rows = df[df["Setup"].isin(WATCHLIST_SETUPS)].copy()
+    if rows.empty:
+        return pd.DataFrame(columns=cols)
+    if "Confluence_Score" in rows.columns:
+        rows = rows.sort_values(["Confluence_Score"], ascending=False, na_position="last")
+    return rows[cols].reset_index(drop=True)
+
+
+def follow_through(prev_full: pd.DataFrame, cur_full: pd.DataFrame) -> pd.DataFrame:
+    """Did yesterday's setups work today? For each setup stock, next close vs its
+    CPR band from the day the setup fired. Followed / Flat / Failed by direction."""
+    cols = [
+        c
+        for c in [
+            "SYMBOL",
+            "Industry",
+            "Setup",
+            "CLOSE",
+            "CPR_Top",
+            "CPR_Bottom",
+            "CPR_Width_Pct",
+            "Width_Rank_Pct",
+            "Segment",
+        ]
+        if c in prev_full.columns
+    ]
+    prev = prev_full[prev_full["Setup"].isin(WATCHLIST_SETUPS)].copy()
+    if prev.empty:
+        return pd.DataFrame()
+    prev = prev[cols].copy()
+    cur = cur_full[["SYMBOL", "CLOSE"]].copy()
+    cur = cur.rename(columns={"CLOSE": "Next_Close"})
+    prev["SYMBOL"] = prev["SYMBOL"].astype(str).str.strip().str.upper()
+    merged = prev.merge(cur, on="SYMBOL", how="left")
+    up = merged["Setup"].isin(["Long", "Watch Long"])
+    down = merged["Setup"].isin(["Short", "Watch Short"])
+    merged["Follow_Through"] = "No data"
+    merged.loc[up, "Follow_Through"] = np.select(
+        [
+            merged.loc[up, "Next_Close"] > merged.loc[up, "CPR_Top"],
+            merged.loc[up, "Next_Close"] < merged.loc[up, "CPR_Bottom"],
+        ],
+        ["Followed", "Failed"],
+        default="Flat",
+    )
+    merged.loc[down, "Follow_Through"] = np.select(
+        [
+            merged.loc[down, "Next_Close"] < merged.loc[down, "CPR_Bottom"],
+            merged.loc[down, "Next_Close"] > merged.loc[down, "CPR_Top"],
+        ],
+        ["Followed", "Failed"],
+        default="Flat",
+    )
+    merged["Next_Close"] = pd.to_numeric(merged["Next_Close"], errors="coerce")
+    return merged.reset_index(drop=True)
+
+
 def split_shortlists(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    full_table = df.sort_values("CPR_Width_Pct").reset_index(drop=True)
+    full_table = df.sort_values(["Confluence_Score", "CPR_Width_Pct"], ascending=[False, True], na_position="last").reset_index(drop=True) if "Confluence_Score" in df.columns else df.sort_values("CPR_Width_Pct").reset_index(drop=True)
     narrow = df[df["CPR_Class"] == "Narrow"].sort_values("CPR_Width_Pct").reset_index(drop=True)
     bullish = df[df["Bullish_CPR"]].sort_values("CPR_Width_Pct").reset_index(drop=True)
     bearish = df[df["Bearish_CPR"]].sort_values("CPR_Width_Pct", ascending=False).reset_index(drop=True)
@@ -884,12 +1334,13 @@ def split_shortlists(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, pd.D
             "Bias",
             "Price_Position",
             "Segment",
+            "Confluence_Score",
         ]
         if c in df.columns
     ]
     ranked = pd.DataFrame(columns=df.columns)
     if "Setup" in df.columns:
-        ranked = df[df["Setup"].isin(["Long", "Short", "Watch"])]
+        ranked = df[df["Setup"].isin(["Long", "Short", "Watch Long", "Watch Short", "Watch"])]
         if not ranked.empty:
             liquid_mask = _liquid_enough(ranked).reindex(ranked.index).fillna(False)
             liquid = ranked.loc[liquid_mask]
@@ -899,9 +1350,9 @@ def split_shortlists(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, pd.D
         ranked = df[df["Own_Narrow"].astype(bool)]
     if ranked.empty:
         ranked = narrow[narrow["CPR_Width_Pct"] > 0] if "CPR_Width_Pct" in narrow.columns else narrow
-    sort_col = "Width_Rank_Pct" if "Width_Rank_Pct" in ranked.columns else "CPR_Width_Pct"
+    sort_col = "Confluence_Score" if "Confluence_Score" in ranked.columns else ("Width_Rank_Pct" if "Width_Rank_Pct" in ranked.columns else "CPR_Width_Pct")
     if not ranked.empty and sort_col in ranked.columns:
-        ranked = ranked.sort_values(sort_col, na_position="last")
+        ranked = ranked.sort_values(sort_col, ascending=False, na_position="last")
     top20 = ranked.head(20)[top_cols].reset_index(drop=True) if not ranked.empty else pd.DataFrame(columns=top_cols)
     return full_table, narrow, bullish, bearish, top20
 
@@ -922,12 +1373,20 @@ def export_results(
     bullish.to_csv(output_dir / f"cpr_bullish_{date}.csv", index=False)
     bearish.to_csv(output_dir / f"cpr_bearish_{date}.csv", index=False)
     top20.to_csv(output_dir / f"cpr_top20_narrow_{date}.csv", index=False)
+    best = compute_best(df)
+    best.to_csv(output_dir / f"cpr_best_{date}.csv", index=False)
+    watchlist = compute_watchlist(df)
+    if not watchlist.empty:
+        watchlist.to_csv(output_dir / f"cpr_watchlist_{date}.csv", index=False)
     if verbose:
         print(f"✓ Full table: {output_dir / f'cpr_full_{date}.csv'}")
         print(f"✓ Narrow CPR: {len(narrow)} symbols → {output_dir / f'cpr_narrow_{date}.csv'}")
         print(f"✓ Bullish CPR: {len(bullish)} symbols → {output_dir / f'cpr_bullish_{date}.csv'}")
         print(f"✓ Bearish CPR: {len(bearish)} symbols → {output_dir / f'cpr_bearish_{date}.csv'}")
         print(f"✓ Top 20 Narrow: {output_dir / f'cpr_top20_narrow_{date}.csv'}")
+        print(f"✓ Best today: {len(best)} symbols → {output_dir / f'cpr_best_{date}.csv'}")
+        if not watchlist.empty:
+            print(f"✓ Watchlist: {len(watchlist)} symbols → {output_dir / f'cpr_watchlist_{date}.csv'}")
 
     return ScanResult(
         date=date,
@@ -939,6 +1398,8 @@ def export_results(
         bearish=bearish,
         top20=top20,
         output_dir=output_dir,
+        best=best,
+        watchlist=watchlist,
     )
 
 
@@ -988,6 +1449,7 @@ def scan_eod_cpr(
             result = attach_htf_to_result(result, output_dir=output_dir, write_csv=True)
             if lookback and lookback > 0:
                 backfill_cached_scans(date, output_dir=output_dir, lookback=lookback, skip_existing=True)
+                backfill_htf_scans(date, output_dir=output_dir, lookback=lookback)
             return result
 
         full_table, narrow, bullish, bearish, top20 = split_shortlists(cash_df)

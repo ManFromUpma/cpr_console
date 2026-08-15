@@ -9,9 +9,12 @@ import pandas as pd
 from nse_cpr_scanner import (
     apply_bullish_cpr_filters,
     attach_industry,
+    attach_htf_to_result,
+    backfill_htf_scans,
     compute_cpr,
     export_results,
     keep_listed_equity,
+    load_scan_result,
     normalize_bhavcopy,
     split_shortlists,
     tag_fo_symbols,
@@ -97,10 +100,10 @@ class TestFlagsAndTags(unittest.TestCase):
         df = pd.DataFrame(
             {
                 "SYMBOL": ["WIDE"],
-                "OPEN": [50],
-                "HIGH": [55],
-                "LOW": [45],
-                "CLOSE": [46],
+                "OPEN": [100.0],
+                "HIGH": [100.2],
+                "LOW": [99.7],
+                "CLOSE": [99.8],
             }
         )
         out = apply_bullish_cpr_filters(compute_cpr(df)).iloc[0]
@@ -128,8 +131,56 @@ class TestExport(unittest.TestCase):
         with TemporaryDirectory() as tmp:
             result = export_results(cash, "20260813", output_dir=Path(tmp))
             self.assertTrue((Path(tmp) / "cpr_full_20260813.csv").exists())
+            self.assertTrue((Path(tmp) / "cpr_best_20260813.csv").exists())
             self.assertEqual(result.date, "20260813")
             self.assertFalse(result.top20.empty)
+
+    def test_confluence_cols_in_export_and_reload(self):
+        cash = normalize_bhavcopy(_udi_cash(), cash_only=True)
+        cash = tag_fo_symbols(cash, pd.DataFrame({"SYMBOL": ["AAA"]}))
+        cash = apply_bullish_cpr_filters(compute_cpr(cash))
+        cash["Setup"] = "No setup"
+        with TemporaryDirectory() as tmp:
+            out = Path(tmp)
+            cache_dir_n = out / "bhavcopy"
+            cache_dir_n.mkdir(parents=True, exist_ok=True)
+            from nse_cpr_scanner import seed_bhavcopy_cache
+
+            seed_bhavcopy_cache(cash, "20260813", output_dir=out)
+            seed_bhavcopy_cache(cash, "20260812", output_dir=out)
+            seed_bhavcopy_cache(cash, "20260811", output_dir=out)
+            seed_bhavcopy_cache(cash, "20260810", output_dir=out)
+            seed_bhavcopy_cache(cash, "20260807", output_dir=out)
+            result = export_results(cash, "20260813", output_dir=out)
+            result.full = attach_htf_to_result(result, output_dir=out, write_csv=True).full
+            self.assertIn("Confluence_Score", result.full.columns)
+            reloaded = load_scan_result("20260813", output_dir=out)
+            self.assertIn("Confluence_Score", reloaded.full.columns)
+
+    def test_htf_archive_backfill_writes_weekly_monthly(self):
+        cash = normalize_bhavcopy(_udi_cash(), cash_only=True)
+        cash = tag_fo_symbols(cash, pd.DataFrame({"SYMBOL": ["AAA"]}))
+        cash = apply_bullish_cpr_filters(compute_cpr(cash))
+        from nse_cpr_scanner import seed_bhavcopy_cache
+
+        with TemporaryDirectory() as tmp:
+            out = Path(tmp) / "out"
+            out.mkdir()
+            # 130 session weekdays → ~26 weeks (≥12) and ~7 months (≥6) of HTF bars.
+            from datetime import date, timedelta
+
+            d = date(2026, 1, 1)
+            sessions = []
+            while len(sessions) < 130:
+                if d.weekday() < 5:
+                    sessions.append(d.strftime("%Y%m%d"))
+                d += timedelta(days=1)
+            for s in sessions:
+                seed_bhavcopy_cache(cash, s, output_dir=out)
+                export_results(cash, s, output_dir=out, verbose=False)
+            backfill_htf_scans(sessions[-1], output_dir=out, lookback=130)
+            self.assertTrue((out / f"cpr_weekly_{sessions[-1]}.csv").exists())
+            self.assertTrue((out / f"cpr_monthly_{sessions[-1]}.csv").exists())
 
 
 class TestEquityAndIndustry(unittest.TestCase):

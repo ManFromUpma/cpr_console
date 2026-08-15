@@ -16,7 +16,15 @@ import pandas as pd
 import pytz
 import streamlit as st
 
-from nse_cpr_scanner import DISPLAY_COLS, HISTORY_LOOKBACK_HTF, scan_eod_cpr
+from nse_cpr_scanner import (
+    DISPLAY_COLS,
+    HISTORY_LOOKBACK_HTF,
+    SETUP_CUSHION_PCT,
+    compute_best,
+    compute_watchlist,
+    follow_through,
+    scan_eod_cpr,
+)
 
 IST = pytz.timezone("Asia/Kolkata")
 
@@ -83,12 +91,38 @@ def color_overlay(val: str) -> str:
 
 
 def color_setup(val: str) -> str:
-    if val == "Long":
+    if val in ("Long", "Watch Long"):
         return "color: #2e7d32; font-weight: 600"
-    if val == "Short":
+    if val in ("Short", "Watch Short"):
         return "color: #c62828; font-weight: 600"
     if val == "Watch":
         return "color: #6a1b9a; font-weight: 600"
+    return ""
+
+
+def color_bool(val) -> str:
+    if val in (True, "True", "true", "Yes", "yes", 1, "1"):
+        return "color: #2e7d32"
+    return ""
+
+
+def color_regime(val: str) -> str:
+    if val == "Risk On":
+        return "color: #2e7d32; font-weight: 600"
+    if val == "Risk Off":
+        return "color: #c62828; font-weight: 600"
+    return ""
+
+
+def color_signal(val) -> str:
+    try:
+        n = float(val)
+    except (TypeError, ValueError):
+        return ""
+    if n > 0:
+        return "color: #2e7d32; font-weight: 600"
+    if n < 0:
+        return "color: #c62828; font-weight: 600"
     return ""
 
 
@@ -106,12 +140,20 @@ def style_table(df: pd.DataFrame):
         styled = styled.map(color_overlay, subset=["Overlay"])
     if "Setup" in df.columns:
         styled = styled.map(color_setup, subset=["Setup"])
+    if "Regime" in df.columns:
+        styled = styled.map(color_regime, subset=["Regime"])
+    for col in ("Daily_Signal", "Weekly_Signal", "Monthly_Signal", "Confluence_Score"):
+        if col in df.columns:
+            styled = styled.map(color_signal, subset=[col])
+    for col in ("Above_SMA50", "Above_SMA100", "Nifty500", "History_OK"):
+        if col in df.columns:
+            styled = styled.map(color_bool, subset=[col])
     return styled
 
 
 def format_view(df: pd.DataFrame) -> pd.DataFrame:
     show = df.copy()
-    money = ["CLOSE", "Pivot", "BC", "TC", "CPR_Bottom", "CPR_Top", "CPR_Width"]
+    money = ["CLOSE", "Pivot", "BC", "TC", "CPR_Bottom", "CPR_Top", "CPR_Width", "Value_60d", "ATR14", "Width_ATR", "Next_Close"]
     for col in money:
         if col in show.columns:
             show[col] = show[col].apply(lambda x: f"{x:.2f}" if pd.notna(x) else "—")
@@ -119,6 +161,8 @@ def format_view(df: pd.DataFrame) -> pd.DataFrame:
         show["CPR_Width_Pct"] = show["CPR_Width_Pct"].apply(lambda x: f"{x:.4f}" if pd.notna(x) else "—")
     if "Width_Rank_Pct" in show.columns:
         show["Width_Rank_Pct"] = show["Width_Rank_Pct"].apply(lambda x: f"{x:.2f}" if pd.notna(x) else "—")
+    if "Value_Ratio" in show.columns:
+        show["Value_Ratio"] = show["Value_Ratio"].apply(lambda x: f"{x:.2f}" if pd.notna(x) else "—")
     cols = [c for c in DISPLAY_COLS if c in show.columns]
     extra = [c for c in show.columns if c not in cols]
     return show[cols + extra]
@@ -168,10 +212,15 @@ with st.sidebar:
         ["Any", "Higher", "Lower", "Inside", "Outside", "Overlapping", "Unknown"],
         index=0,
     )
-    setup_filter = st.selectbox("Setup", ["Any", "Long", "Short", "Watch", "No setup"], index=0)
+    setup_filter = st.selectbox("Setup", ["Any", "Long", "Short", "Watch Long", "Watch Short", "Watch", "No setup"], index=0)
     own_narrow_filter = st.selectbox("Own-history narrow", ["Any", "Yes", "No"], index=0)
+    nifty_only = st.checkbox("Nifty 500 only", value=False)
+    hide_unclassified = st.checkbox("Hide Unclassified industry", value=False)
 
-    st.caption("Absolute Narrow ≤ 0.25% · Own_Narrow = bottom 25% of that name’s last 60 sessions")
+    st.caption(
+        f"Absolute Narrow ≤ 0.25% · Own_Narrow = bottom 25% of that name’s last 60 sessions · "
+        f"Setups need a ≥ {SETUP_CUSHION_PCT:.0%} close beyond the band"
+    )
 
 st.title("📥 NSE EOD CPR Scanner")
 st.markdown(
@@ -206,13 +255,17 @@ if result is None:
     st.info("Pick a session date and click **Scan bhavcopy**. Typical choice is the last trading day.")
     st.stop()
 
-m1, m2, m3, m4, m5, m6 = st.columns(6)
+m1, m2, m3, m4, m5, m6, m7 = st.columns(7)
 m1.metric("EQ symbols", result.cash_rows)
 m2.metric("Narrow", len(result.narrow))
 m3.metric("Own narrow", int(result.full["Own_Narrow"].sum()) if "Own_Narrow" in result.full.columns else "—")
-m4.metric("Setups", int(result.full["Setup"].isin(["Long", "Short", "Watch"]).sum()) if "Setup" in result.full.columns else "—")
+m4.metric("Setups", int(result.full["Setup"].isin(["Long", "Short", "Watch Long", "Watch Short", "Watch"]).sum()) if "Setup" in result.full.columns else "—")
 m5.metric("Bullish CPR", len(result.bullish))
 m6.metric("F&O tagged", "Yes" if result.fo_available else "No")
+regime = ""
+if "Regime" in result.full.columns and not result.full["Regime"].dropna().empty:
+    regime = str(result.full["Regime"].dropna().value_counts().idxmax())
+m7.metric("NIFTY regime", regime or "—")
 st.caption(f"Session {result.date} · files in `{result.output_dir}`")
 
 
@@ -235,12 +288,31 @@ def apply_filters(df: pd.DataFrame) -> pd.DataFrame:
     if own_narrow_filter != "Any" and "Own_Narrow" in view.columns:
         want = own_narrow_filter == "Yes"
         view = view[view["Own_Narrow"].astype(bool) == want]
+    if nifty_only and "Nifty500" in view.columns:
+        view = view[view["Nifty500"].astype(bool)]
+    if hide_unclassified and "Industry" in view.columns:
+        view = view[view["Industry"] != "Unclassified"]
     return view.reset_index(drop=True)
 
 
-tab_full, tab_narrow, tab_bull, tab_bear, tab_top, tab_week, tab_month, tab_rules = st.tabs(
-    ["Full table", "Narrow", "Bullish CPR", "Bearish CPR", "Top 20 narrow", "Weekly CPR", "Monthly CPR", "Rules"]
+tab_best, tab_full, tab_narrow, tab_bull, tab_bear, tab_top, tab_wl, tab_follow, tab_week, tab_month, tab_rules = st.tabs(
+    ["Best today", "Full table", "Narrow", "Bullish CPR", "Bearish CPR", "Top 20 narrow", "Watchlist", "Follow-through", "Weekly CPR", "Monthly CPR", "Rules"]
 )
+
+with tab_best:
+    best = result.best if not result.best.empty else compute_best(result.full)
+    st.caption("Daily Long / Short setups ranked by |Confluence_Score| (D+W+M agreement), liquid by 60-day turnover, F&O first.")
+    if best.empty:
+        st.info("No Long/Short setups today.")
+    else:
+        st.dataframe(style_table(format_view(best)), use_container_width=True, height=480)
+        st.download_button(
+            "📥 Download best today (CSV)",
+            data=csv_bytes(best),
+            file_name=f"cpr_best_{result.date}.csv",
+            mime="text/csv",
+            use_container_width=True,
+        )
 
 with tab_full:
     view = apply_filters(result.full)
@@ -303,7 +375,7 @@ with tab_bear:
         )
 
 with tab_top:
-    st.caption("Tradable setups: Own_Narrow + overlay, day’s turnover ≥ ₹2 cr, ranked by width percentile")
+    st.caption("Tradable setups: Own_Narrow + overlay, 60-day median turnover ≥ ₹2 cr, ranked by confluence then width percentile")
     if result.top20.empty:
         st.info("No narrow names to rank.")
     else:
@@ -312,6 +384,36 @@ with tab_top:
             "📥 Download top 20 (CSV)",
             data=csv_bytes(result.top20),
             file_name=f"cpr_top20_narrow_{result.date}.csv",
+            mime="text/csv",
+            use_container_width=True,
+        )
+
+with tab_wl:
+    wl = result.watchlist if not result.watchlist.empty else compute_watchlist(result.full)
+    st.caption("Weekend watchlist — every setup with the levels to trade the next session.")
+    if wl.empty:
+        st.info("No active setups today.")
+    else:
+        st.dataframe(style_table(format_view(wl)), use_container_width=True, height=480)
+        st.download_button(
+            "📥 Download watchlist (CSV)",
+            data=csv_bytes(wl),
+            file_name=f"cpr_watchlist_{result.date}.csv",
+            mime="text/csv",
+            use_container_width=True,
+        )
+
+with tab_follow:
+    ft = result.follow_through if not result.follow_through.empty else pd.DataFrame()
+    st.caption("Prior session's setups vs this session's close — did Long/Short follow through? Followed / Flat / Failed.")
+    if ft.empty:
+        st.info("No previous session setups to verify yet.")
+    else:
+        st.dataframe(style_table(format_view(ft)), use_container_width=True, height=480)
+        st.download_button(
+            "📥 Download follow-through (CSV)",
+            data=csv_bytes(ft),
+            file_name=f"cpr_follow_through_{result.date}.csv",
             mime="text/csv",
             use_container_width=True,
         )
@@ -370,13 +472,14 @@ This app on **port 8503** is a **third screener**:
 6. **Narrow** ≤ 0.25% · **Moderate** 0.25–0.75% · **Wide** > 0.75% (absolute labels)
 7. **Own_Narrow**: this name’s width is in the bottom 25% of its last ~60 sessions (daily)
 8. **Overlay**: today’s CPR vs the prior session — Higher / Lower / Inside / Outside / Overlapping
-9. **Setup**: Long = Own_Narrow + Above CPR + Higher overlay; Short = Own_Narrow + Below + Lower; Watch = Own_Narrow + Inside
-10. **Bullish CPR** (legacy): close above CPR + Pivot > BC + width < 0.25%
-11. **Bearish CPR** (legacy): close below CPR + Pivot < BC
-12. Tag each cash symbol **F&O + Cash** if it appears in the F&O bhavcopy
-13. Top 20 ranks Setup names with VALUE ≥ ₹2 cr by width percentile, not raw Width %
+9. **Setup**: Long = Own_Narrow + above CPR + bullish bias + Higher overlay + close ≥ 0.2% past the band top; Short is the mirror below the band bottom; Watch Long / Watch Short = Own_Narrow + inside the band + bias; Watch = Own_Narrow + inside + neutral. Long pauses in a Risk-Off NIFTY regime, Short in Risk-On.
+10. **Confluence_Score**: Daily (Long +2, Watch Long +1, Short −2, Watch Short −1) + Weekly signal + Monthly signal, range −6 … +6. Sign is net direction, magnitude is multi-timeframe agreement.
+11. **Bullish CPR** (legacy): close above CPR + Pivot > BC + width < 0.25%; **Bearish CPR**: close below CPR + Pivot < BC + width < 0.25% (now symmetric).
+12. Tag each cash symbol **F&O + Cash** if it appears in the F&O bhavcopy; **Nifty500** = has a mapped Nifty-500 industry.
+13. Top 20 / Best today rank liquid setups (60-day median VALUE ≥ ₹2 cr) by confluence then width percentile.
 14. **Weekly CPR**: same formulas on the last completed Mon–Fri week, from the ~252-day bhavcopy cache (~52 weekly bars). Applies to the **next** week. Hold days, not 15:15 flatten.
 15. **Monthly CPR**: same formulas on the last completed calendar month, from the ~252-day bhavcopy cache (~12 monthly bars). Applies to the **next** month. If August is not over, you are still using July’s monthly box.
+16. **Follow-through** verifies the previous session's setups against this session's close — Followed / Flat / Failed by direction.
 
 **Not the same as the live console.** This is EOD, exchange bhavcopy, no Yahoo, no virgin-CPR live quotes.
 """
