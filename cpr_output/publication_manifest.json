@@ -1,14 +1,14 @@
 {
   "actual_data_date": "20260818",
   "freshness": {
-    "display": "Legacy archive freshness unknown",
-    "status": "unknown"
+    "display": "Source session verified",
+    "status": "known"
   },
-  "generated_at_utc": "2026-08-18T20:30:27+00:00",
+  "generated_at_utc": "2026-08-18T20:40:24+00:00",
   "history": {
-    "cached_sessions": 0,
-    "oldest_cached_date": null,
-    "requested_sessions": 0
+    "cached_sessions": 252,
+    "oldest_cached_date": "20250808",
+    "requested_sessions": 252
   },
   "requested_date": null,
   "schema_version": 1,
@@ -16,7 +16,7 @@
     "attempted_dates": [
       "20260818"
     ],
-    "mode": "site_only",
+    "mode": "latest_available",
     "name": "NSE UDI bhavcopy"
   }
 }
