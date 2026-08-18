@@ -319,6 +319,19 @@ def _page_html(payload: dict, asset_prefix: str) -> str:
     </table>
   </div>
 
+  <div id="drawerBackdrop" class="drawer-backdrop" hidden></div>
+  <aside id="symbolDrawer" class="symbol-drawer" hidden aria-labelledby="drawerTitle" aria-modal="true" role="dialog">
+    <div class="drawer-head">
+      <div>
+        <p class="kicker">Symbol context</p>
+        <h2 id="drawerTitle">Symbol</h2>
+        <p id="drawerSubtitle" class="drawer-subtitle"></p>
+      </div>
+      <button id="drawerClose" class="drawer-close" type="button" aria-label="Close symbol context">Close</button>
+    </div>
+    <div id="drawerBody"></div>
+  </aside>
+
   <footer>
     Equity stocks only (ETFs, AMCs, mutual funds excluded). Industry from Nifty 500.
     Built from NSE UDI cash + F&amp;O bhavcopy plus ~252 prior cash sessions.
@@ -353,7 +366,9 @@ CSS = """
   --narrow: #c9a7ff;
 }
 * { box-sizing: border-box; }
+[hidden] { display: none !important; }
 html, body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.45 "IBM Plex Sans", "Segoe UI", sans-serif; }
+body.drawer-open { overflow: hidden; }
 .top { display: flex; justify-content: space-between; align-items: end; gap: 16px; padding: 28px 24px 12px; border-bottom: 1px solid var(--line); }
 .kicker { margin: 0; color: var(--accent); letter-spacing: .12em; text-transform: uppercase; font-size: 11px; }
 h1 { margin: 4px 0 0; font-size: 28px; font-weight: 650; }
@@ -383,14 +398,44 @@ th.sorted { color: var(--text); }
 th.sorted.asc { box-shadow: inset 0 -2px 0 var(--accent); }
 th.sorted.desc { box-shadow: inset 0 2px 0 var(--accent); }
 td { padding: 7px 8px; border-bottom: 1px solid #232b33; }
+tr[data-symbol] { cursor: pointer; }
+tr[data-symbol]:focus-visible td { outline: 2px solid var(--accent); outline-offset: -2px; }
 tr:hover td { background: #182028; }
 .bull { color: var(--bull); font-weight: 600; }
 .bear { color: var(--bear); font-weight: 600; }
 .narrow { color: var(--narrow); }
 footer { padding: 12px 24px 32px; color: var(--muted); font-size: 12px; border-top: 1px solid var(--line); }
+.drawer-backdrop { position: fixed; inset: 0; z-index: 20; background: rgba(4, 7, 10, .68); }
+.symbol-drawer { position: fixed; z-index: 21; top: 0; right: 0; width: min(500px, 100vw); height: 100vh; overflow-y: auto; padding: 24px; background: #151b21; border-left: 1px solid var(--line); box-shadow: -18px 0 48px rgba(0, 0, 0, .34); }
+.drawer-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; padding-bottom: 18px; border-bottom: 1px solid var(--line); }
+.drawer-head h2 { margin: 3px 0 0; font-size: 28px; }
+.drawer-subtitle { margin: 4px 0 0; color: var(--muted); }
+.drawer-close { flex: 0 0 auto; background: transparent; color: var(--text); border: 1px solid var(--line); border-radius: 8px; padding: 7px 10px; cursor: pointer; }
+.drawer-close:hover, .drawer-close:focus-visible { border-color: var(--accent); color: var(--accent); }
+.drawer-section { padding: 18px 0; border-bottom: 1px solid var(--line); }
+.drawer-section h3 { margin: 0 0 10px; font-size: 12px; color: var(--muted); letter-spacing: .08em; text-transform: uppercase; }
+.drawer-summary { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.detail-item { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; }
+.detail-item span { display: block; color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .06em; }
+.detail-item strong { display: block; margin-top: 3px; font-size: 16px; }
+.detail-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.badge { display: inline-flex; align-items: center; width: fit-content; border: 1px solid currentColor; border-radius: 999px; padding: 2px 8px; font-size: 11px; font-weight: 700; line-height: 1.35; }
+.badge.confirmed { color: var(--bull); background: rgba(62, 207, 142, .1); }
+.badge.watch { color: var(--narrow); background: rgba(201, 167, 255, .1); }
+.badge.unavailable { color: var(--bear); background: rgba(239, 107, 107, .1); }
+.badge.neutral { color: var(--muted); background: rgba(147, 160, 173, .08); }
+.cpr-chart { width: 100%; min-height: 180px; margin: 4px 0 0; padding: 8px 0; background: #11171c; border: 1px solid var(--line); border-radius: 10px; }
+.cpr-chart svg { display: block; width: 100%; height: auto; }
+.cpr-chart .band { fill: rgba(142, 192, 245, .24); stroke: var(--accent); stroke-width: 1; }
+.cpr-chart .price-line { stroke: var(--bull); stroke-width: 2; }
+.cpr-chart .price-dot { fill: var(--bull); }
+.cpr-chart .level-line { stroke: #667482; stroke-width: 1; stroke-dasharray: 4 4; }
+.cpr-chart text { fill: var(--muted); font: 11px "IBM Plex Sans", "Segoe UI", sans-serif; }
+.drawer-explanation { margin: 0; color: var(--muted); }
 @media (max-width: 800px) {
   .metrics { grid-template-columns: repeat(2, 1fr); }
   .top { flex-direction: column; align-items: start; }
+  .symbol-drawer { width: 100vw; padding: 18px; }
 }
 """
 
@@ -400,8 +445,30 @@ const COLS = ["SYMBOL","Industry","CLOSE","Pivot","BC","TC","CPR_Width_Pct","Wid
 const FOLLOW_COLS = ["SYMBOL","Industry","Setup","CPR_Width_Pct","Width_Rank_Pct","Segment","Next_Close","Follow_Through"];
 let tab = "best";
 let sort = {col: null, asc: true};
+let drawerTrigger = null;
 
 function $(id) { return document.getElementById(id); }
+
+function esc(value) {
+  return String(value ?? "—").replace(/[&<>"']/g, ch => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[ch]));
+}
+
+function finite(value) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
+}
+
+function badgeClass(value) {
+  if (value === "Confirmed") return "confirmed";
+  if (value === "Watch") return "watch";
+  if (value === "Unavailable") return "unavailable";
+  return "neutral";
+}
+
+function badgeHtml(value) {
+  const label = value === null || value === undefined || value === "" ? "—" : value;
+  return `<span class="badge ${badgeClass(label)}">${esc(label)}</span>`;
+}
 
 function fillIndustry() {
   const sel = $("industry");
@@ -487,6 +554,11 @@ function fmt(col, val) {
   return val;
 }
 
+function cellHtml(col, val) {
+  const rendered = fmt(col, val);
+  return col === "Strategy_Confirmation" ? badgeHtml(rendered) : esc(rendered);
+}
+
 function klass(col, val) {
   if (col === "Bias" && val === "Bullish") return "bull";
   if (col === "Bias" && val === "Bearish") return "bear";
@@ -567,6 +639,81 @@ function sortRows(data) {
   });
 }
 
+function cprMiniChart(row) {
+  const pivot = finite(row.Pivot), bc = finite(row.BC), tc = finite(row.TC), close = finite(row.CLOSE);
+  const levels = [pivot, bc, tc, close].filter(value => value !== null);
+  if (!levels.length) return `<div class="drawer-explanation">CPR levels unavailable for this row.</div>`;
+  const min = Math.min(...levels), max = Math.max(...levels);
+  const span = Math.max(max - min, Math.abs(max) * 0.0025, 0.01);
+  const low = min - span * 0.35, high = max + span * 0.35;
+  const y = value => 148 - ((value - low) / (high - low)) * 112;
+  const bandLow = bc === null || tc === null ? null : Math.min(bc, tc);
+  const bandHigh = bc === null || tc === null ? null : Math.max(bc, tc);
+  const bandTop = bandHigh === null ? 0 : y(bandHigh);
+  const bandHeight = bandLow === null ? 0 : Math.max(2, y(bandLow) - bandTop);
+  const marks = [];
+  if (bandLow !== null) marks.push(`<rect class="band" x="38" y="${bandTop.toFixed(1)}" width="344" height="${bandHeight.toFixed(1)}" rx="4"/>`);
+  if (pivot !== null) marks.push(`<line class="level-line" x1="38" x2="382" y1="${y(pivot).toFixed(1)}" y2="${y(pivot).toFixed(1)}"/>`);
+  if (close !== null) marks.push(`<line class="price-line" x1="38" x2="382" y1="${y(close).toFixed(1)}" y2="${y(close).toFixed(1)}"/><circle class="price-dot" cx="382" cy="${y(close).toFixed(1)}" r="4"/>`);
+  const label = value => value === null ? "—" : Number(value).toFixed(2);
+  return `<div class="cpr-chart" role="img" aria-label="CPR band mini chart for ${esc(row.SYMBOL)}">
+    <svg viewBox="0 0 420 180" preserveAspectRatio="none">
+      ${marks.join("")}
+      <text x="6" y="${Math.min(170, Math.max(18, (bandTop || 18) + 4)).toFixed(1)}">CPR</text>
+      <text x="38" y="172">BC ${esc(label(bc))}</text>
+      <text x="170" y="172">Pivot ${esc(label(pivot))}</text>
+      <text x="300" y="172">Close ${esc(label(close))}</text>
+    </svg>
+  </div>`;
+}
+
+function detailItem(label, value) {
+  return `<div class="detail-item"><span>${esc(label)}</span><strong>${esc(value === null || value === undefined || value === "" ? "—" : value)}</strong></div>`;
+}
+
+function openDrawer(row, trigger) {
+  drawerTrigger = trigger || null;
+  $("drawerTitle").textContent = row.SYMBOL || "Symbol";
+  $("drawerSubtitle").textContent = [row.Strategy_Setup, row.CPR_Class, row.Price_Position].filter(Boolean).join(" · ");
+  const confirmation = row.Strategy_Confirmation;
+  $("drawerBody").innerHTML = `
+    <section class="drawer-section drawer-summary">
+      <div class="detail-item"><span>Confirmation</span><strong>${badgeHtml(confirmation)}</strong></div>
+      <div class="detail-item"><span>Signal grade</span><strong>${badgeHtml(row.Signal_Grade || row.Signal_Direction)}</strong></div>
+    </section>
+    <section class="drawer-section">
+      <h3>Next-session CPR band</h3>
+      ${cprMiniChart(row)}
+    </section>
+    <section class="drawer-section">
+      <h3>Context</h3>
+      <div class="detail-grid">
+        ${detailItem("Close", fmt("CLOSE", row.CLOSE))}
+        ${detailItem("CPR width %", fmt("CPR_Width_Pct", row.CPR_Width_Pct))}
+        ${detailItem("Price position", row.Price_Position)}
+        ${detailItem("Overlay", row.Overlay)}
+        ${detailItem("Value ratio", fmt("Value_Ratio", row.Value_Ratio))}
+        ${detailItem("Trend", `${row.Above_SMA50 === true ? "Above" : row.Above_SMA50 === false ? "Below" : "—"} SMA50 · ${row.Above_SMA100 === true ? "Above" : row.Above_SMA100 === false ? "Below" : "—"} SMA100`)}
+      </div>
+    </section>
+    <section class="drawer-section">
+      <h3>Explanation</h3>
+      <p class="drawer-explanation">${esc(row.Strategy_Explanation || row.Signal_Explanation || "No explanation available.")}</p>
+    </section>`;
+  $("drawerBackdrop").hidden = false;
+  $("symbolDrawer").hidden = false;
+  document.body.classList.add("drawer-open");
+  $("drawerClose").focus();
+}
+
+function closeDrawer() {
+  $("drawerBackdrop").hidden = true;
+  $("symbolDrawer").hidden = true;
+  document.body.classList.remove("drawer-open");
+  if (drawerTrigger) drawerTrigger.focus();
+  drawerTrigger = null;
+}
+
 function render() {
   const data = sortRows(rows());
   const htf = DATA.htf || {};
@@ -581,9 +728,16 @@ function render() {
   $("head").innerHTML = "<tr>" + cols.map(c =>
     `<th data-col="${c}" class="${sort.col===c?(sort.asc?'sorted asc':'sorted desc'):''}">${c.replaceAll("_"," ")}${sort.col===c?(sort.asc?' ▲':' ▼'):''}</th>`
   ).join("") + "</tr>";
-  $("body").innerHTML = data.map(r =>
-    "<tr>" + cols.map(c => `<td class="${klass(c, r[c])}">${fmt(c, r[c])}</td>`).join("") + "</tr>"
+  $("body").innerHTML = data.map((r, index) =>
+    `<tr tabindex="0" data-symbol="${esc(r.SYMBOL)}" data-index="${index}" title="Open symbol context">` + cols.map(c => `<td class="${klass(c, r[c])}">${cellHtml(c, r[c])}</td>`).join("") + "</tr>"
   ).join("");
+  document.querySelectorAll("#body tr[data-index]").forEach(tr => {
+    const open = () => openDrawer(data[Number(tr.dataset.index)], tr);
+    tr.addEventListener("click", open);
+    tr.addEventListener("keydown", event => {
+      if (event.key === "Enter" || event.key === " ") { event.preventDefault(); open(); }
+    });
+  });
   document.querySelectorAll("th").forEach(th => th.addEventListener("click", () => {
     const col = th.dataset.col;
     if (sort.col === col) sort.asc = !sort.asc; else { sort.col = col; sort.asc = true; }
@@ -611,6 +765,9 @@ function syncUrl() {
   }
 }
 
+$("drawerClose").addEventListener("click", closeDrawer);
+$("drawerBackdrop").addEventListener("click", closeDrawer);
+document.addEventListener("keydown", event => { if (event.key === "Escape" && !$("symbolDrawer").hidden) closeDrawer(); });
 document.querySelectorAll(".tabs button").forEach(btn => {
   btn.addEventListener("click", () => {
     document.querySelectorAll(".tabs button").forEach(b => b.classList.remove("on"));
