@@ -1,0 +1,8 @@
+# Dependencies required by the GitHub Pages EOD build and unittest suite.
+# Keep this separate from requirements.txt so the Pages workflow does not
+# install interactive-only dependencies such as Streamlit.
+pandas>=2.0,<3
+numpy>=1.24,<3
+requests>=2.31,<3
+pytz>=2023.3
+python-dateutil>=2.8.2,<3

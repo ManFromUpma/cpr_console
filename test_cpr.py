@@ -61,8 +61,9 @@ class TestPricePosition(unittest.TestCase):
         self.engine = CPREngine(near_cpr_distance_pct=0.5)
     
     def test_above_cpr(self):
-        """Test price above CPR"""
-        position = self.engine.determine_position(106, 105.0, 105.67)
+        """Test price clearly above CPR and outside the Near threshold"""
+        # Near threshold: 105.67 * (1 + 0.5/100) = 106.19835
+        position = self.engine.determine_position(106.3, 105.0, 105.67)
         self.assertEqual(position, PricePosition.ABOVE)
     
     def test_below_cpr(self):
@@ -77,10 +78,9 @@ class TestPricePosition(unittest.TestCase):
     
     def test_near_cpr_above(self):
         """Test price near CPR (just above)"""
-        # Near threshold: 105.67 * (1 + 0.5/100) = 106.198
+        # 106.0 is above the CPR top but within the 0.5% Near threshold.
         position = self.engine.determine_position(106.0, 105.0, 105.67)
-        # Should be NEAR if within threshold, otherwise ABOVE
-        # This depends on exact implementation
+        self.assertEqual(position, PricePosition.NEAR)
     
     def test_none_values(self):
         """Test with None values"""
