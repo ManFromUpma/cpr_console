@@ -241,13 +241,13 @@ def _industry_options(payload: dict) -> str:
 
 
 def _page_html(payload: dict, asset_prefix: str) -> str:
-    data = json.dumps(payload, separators=(",", ":"), ensure_ascii=True)
     industry_opts = _industry_options(payload)
     return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <meta name="data-session" content="{html.escape(payload["date"], quote=True)}"/>
   <title>EOD CPR · {html.escape(payload["label"])}</title>
   <base href="{asset_prefix}">
   <link rel="stylesheet" href="assets/style.css?v=6"/>
@@ -269,7 +269,7 @@ def _page_html(payload: dict, asset_prefix: str) -> str:
     after the last completed month — not the rest of the current month unless that month is finished.
     Not an NSE product.
   </section>
-  <section class="data-status" id="dataStatus"></section>
+  <section class="data-status" id="dataStatus">Loading session data…</section>
 
   <section class="metrics" id="metrics"></section>
 
@@ -346,8 +346,8 @@ def _page_html(payload: dict, asset_prefix: str) -> str:
     Follow-through compares each setup’s prior-day CPR band to this session’s close.
     Wide CPR adds separate consolidation and range-breakout states; it does not replace the existing Narrow CPR setup labels.
   </footer>
-  <script>window.CPR_DATA = {data};</script>
-  <script src="assets/app.js?v=6"></script>
+  <script>window.CPR_PAYLOAD_URL = "payload.json";</script>
+  <script src="assets/app.js?v=7"></script>
 </body>
 </html>
 """
@@ -440,7 +440,8 @@ footer { padding: 12px 24px 32px; color: var(--muted); font-size: 12px; border-t
 """
 
 JS = r"""
-const DATA = window.CPR_DATA;
+let DATA = null;
+const PAYLOAD_URL = window.CPR_PAYLOAD_URL;
 const COLS = ["SYMBOL","Industry","CLOSE","Pivot","BC","TC","CPR_Width_Pct","Width_Rank_Pct","CPR_Class","Own_Narrow","Overlay","Setup","Bias","Price_Position","Segment","History_Days","Value_60d","ATR14","Width_ATR","Value_Ratio","Above_SMA50","Above_SMA100","Regime","Confluence_Score","Signal_Direction","Signal_Score","Signal_Grade","Signal_Explanation","Strategy_Type","Strategy_Setup","Strategy_Confirmation","Strategy_Explanation","Applies"];
 const FOLLOW_COLS = ["SYMBOL","Industry","Setup","CPR_Width_Pct","Width_Rank_Pct","Segment","Next_Close","Follow_Through"];
 let tab = "best";
@@ -784,13 +785,36 @@ document.querySelectorAll(".tabs button").forEach(btn => {
   const el = $(id);
   if (el) el.addEventListener("change", render);
 });
-parseFilters();
-fillDates();
-fillIndustry();
-metrics();
-publicationStatus();
-downloads();
-render();
+function loadingStatus(message, error = false) {
+  const el = $("dataStatus");
+  if (!el) return;
+  el.textContent = message;
+  el.style.borderColor = error ? "var(--bear)" : "var(--line)";
+}
+
+async function boot() {
+  if (!PAYLOAD_URL) {
+    loadingStatus("Session payload URL is missing.", true);
+    return;
+  }
+  try {
+    const response = await fetch(new URL(PAYLOAD_URL, window.location.href).href, {cache: "no-cache"});
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    DATA = await response.json();
+    parseFilters();
+    fillDates();
+    fillIndustry();
+    metrics();
+    publicationStatus();
+    downloads();
+    render();
+  } catch (error) {
+    loadingStatus(`Unable to load session data: ${error.message || error}`, true);
+  }
+}
+
+loadingStatus("Loading session data…");
+boot();
 """
 
 
@@ -806,6 +830,10 @@ def _write_page(result: ScanResult, dest: Path, dates: List[str], home_href: str
     dest.mkdir(parents=True, exist_ok=True)
     downloads = _write_downloads(result, dest / "downloads")
     payload = _payload(result, downloads, dates, home_href, publication=publication)
+    (dest / "payload.json").write_text(
+        json.dumps(payload, separators=(",", ":"), ensure_ascii=True) + "\n",
+        encoding="utf-8",
+    )
     (dest / "index.html").write_text(_page_html(payload, asset_prefix), encoding="utf-8")
     (dest / "manifest.json").write_text(json.dumps({"date": result.date, "metrics": payload["metrics"]}, indent=2), encoding="utf-8")
 

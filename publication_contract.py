@@ -240,11 +240,24 @@ def validate_site_dir(site_dir: Path, expected_date: Optional[str] = None) -> No
     if missing:
         raise PublicationContractError(f"Generated site is incomplete: missing {missing}")
     html = (site_dir / "index.html").read_text(encoding="utf-8")
-    if "window.CPR_DATA" not in html:
-        raise PublicationContractError("Generated site is missing window.CPR_DATA")
+    if "window.CPR_PAYLOAD_URL" not in html:
+        raise PublicationContractError("Generated site is missing window.CPR_PAYLOAD_URL")
     if expected_date and expected_date not in html:
         raise PublicationContractError(
             f"Generated site does not contain expected latest date {expected_date}"
+        )
+    payload_path = site_dir / "payload.json"
+    if not payload_path.is_file():
+        raise PublicationContractError("Generated site is missing payload.json")
+    try:
+        payload = json.loads(payload_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        raise PublicationContractError(f"Invalid site payload.json: {exc}") from exc
+    if not isinstance(payload, dict) or not isinstance(payload.get("tables"), dict):
+        raise PublicationContractError("site/payload.json must contain a tables object")
+    if expected_date and payload.get("date") != expected_date:
+        raise PublicationContractError(
+            f"site/payload.json date does not match expected latest date {expected_date}"
         )
     try:
         archive = json.loads((site_dir / "archive.json").read_text(encoding="utf-8"))

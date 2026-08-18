@@ -74,7 +74,8 @@ jobs:
           test -f site/index.html
           test -d site/assets
           test -f site/publication_manifest.json
-          grep -q 'window.CPR_DATA' site/index.html
+          test -f site/payload.json
+          grep -q 'window.CPR_PAYLOAD_URL' site/index.html
           grep -q 'id="dataStatus"' site/index.html
           grep -q 'data session' site/assets/app.js
 

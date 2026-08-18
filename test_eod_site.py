@@ -1,5 +1,6 @@
 """Unit tests for the EOD CPR static site (no network)."""
 
+import json
 import unittest
 from datetime import datetime
 from pathlib import Path
@@ -62,14 +63,22 @@ class TestSiteBuild(unittest.TestCase):
             self.assertTrue((site / "downloads" / "cpr_full.csv").exists())
             self.assertTrue((site / "downloads" / "cpr_20260813.zip").exists())
             self.assertTrue((site / "archive" / "20260813" / "index.html").exists())
+            self.assertTrue((site / "archive" / "20260813" / "payload.json").exists())
             html = (site / "index.html").read_text(encoding="utf-8")
-            self.assertIn("AAA", html)
-            self.assertIn("window.CPR_DATA", html)
+            self.assertNotIn("window.CPR_DATA", html)
+            self.assertIn("window.CPR_PAYLOAD_URL", html)
+            self.assertIn('name="data-session"', html)
+            self.assertLess(len(html), 100_000)
+            payload_path = site / "payload.json"
+            self.assertTrue(payload_path.exists())
+            payload = json.loads(payload_path.read_text(encoding="utf-8"))
+            self.assertEqual(payload["date"], "20260813")
+            self.assertEqual(payload["tables"]["full"][0]["SYMBOL"], "AAA")
             self.assertIn("Wide CPR", html)
             self.assertIn('data-tab="wide"', html)
-            self.assertIn("Strategy_Type", html)
-            self.assertIn("Strategy_Explanation", html)
-            self.assertIn('"wide"', html)
+            self.assertIn("Strategy_Type", payload["tables"]["full"][0])
+            self.assertIn("Strategy_Explanation", payload["tables"]["full"][0])
+            self.assertIn("wide", payload["tables"])
             self.assertIn('id="symbolDrawer"', html)
             self.assertIn('id="drawerBackdrop"', html)
             app_js = (site / "assets" / "app.js").read_text(encoding="utf-8")
@@ -80,7 +89,7 @@ class TestSiteBuild(unittest.TestCase):
             self.assertIn(".symbol-drawer", css)
             self.assertIn(".cpr-chart", css)
             self.assertIn(".badge.confirmed", css)
-            self.assertIn("cpr_20260813.zip", html)
+            self.assertIn("cpr_20260813.zip", payload["downloads"]["zip"])
             self.assertTrue((site / "downloads" / "cpr_wide.csv").exists())
             self.assertIn("id=\"industry\"", html)
             self.assertIn("Unclassified", html)
