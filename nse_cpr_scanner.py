@@ -574,7 +574,7 @@ def attached_history_features(
     h = h.sort_values(["SYMBOL", "session"])
     full = h
     if own_window:
-        h = h.groupby("SYMBOL", sort=False).tail(own_window)
+        h = h.groupby("SYMBOL", sort=False).tail(own_window).copy()
     h["prior_top"] = h.groupby("SYMBOL")["CPR_Top"].shift(1)
     h["prior_bot"] = h.groupby("SYMBOL")["CPR_Bottom"].shift(1)
     h["Width_Rank_Pct"] = h.groupby("SYMBOL")["CPR_Width_Pct"].rank(method="average", pct=True)

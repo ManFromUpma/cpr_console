@@ -2,7 +2,6 @@ name: Publish EOD CPR site
 
 on:
   schedule:
-    # 16:45 IST Mon–Fri (11:15 UTC)
     - cron: "15 11 * * 1-5"
   workflow_dispatch:
     inputs:
@@ -59,11 +58,25 @@ jobs:
             python eod_publish.py
           fi
 
+      - name: Validate publication contract
+        env:
+          SITE_ONLY: ${{ inputs.site_only }}
+        run: |
+          if [ "${SITE_ONLY}" = "true" ]; then
+            python -m publication_contract --output-dir cpr_output --site-dir site
+          else
+            python -m publication_contract --output-dir cpr_output --site-dir site --require-known
+          fi
+          git diff --check
+
       - name: Validate generated site
         run: |
           test -f site/index.html
           test -d site/assets
+          test -f site/publication_manifest.json
           grep -q 'window.CPR_DATA' site/index.html
+          grep -q 'id="dataStatus"' site/index.html
+          grep -q 'data session' site/assets/app.js
 
       - name: Commit CSV archive
         run: |

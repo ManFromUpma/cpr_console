@@ -68,6 +68,9 @@ class TestSiteBuild(unittest.TestCase):
             self.assertIn("cpr_20260813.zip", html)
             self.assertIn("id=\"industry\"", html)
             self.assertIn("Unclassified", html)
+            self.assertIn('id="dataStatus"', html)
+            self.assertIn("data session", (site / "assets" / "app.js").read_text(encoding="utf-8"))
+            self.assertTrue((site / "publication_manifest.json").exists())
 
 
 if __name__ == "__main__":

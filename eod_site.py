@@ -32,6 +32,7 @@ from nse_cpr_scanner import (
     load_scan_result,
     web_frame,
 )
+from publication_contract import read_manifest
 
 SITE_DIR = Path("site")
 ROUND_2 = {
@@ -167,7 +168,7 @@ def _write_downloads(result: ScanResult, dest: Path) -> dict:
     }
 
 
-def _payload(result: ScanResult, downloads: dict, dates: Iterable[str], home_href: str) -> dict:
+def _payload(result: ScanResult, downloads: dict, dates: Iterable[str], home_href: str, publication: Optional[dict] = None) -> dict:
     fo_n = int((result.full["Segment"] == "F&O + Cash").sum()) if "Segment" in result.full.columns else 0
     industries = []
     if "Industry" in result.full.columns:
@@ -203,6 +204,7 @@ def _payload(result: ScanResult, downloads: dict, dates: Iterable[str], home_hre
             "regime": regime,
         },
         "downloads": downloads,
+        "publication": publication or {},
         "tables": {
             "full": _records(result.full),
             "narrow": _records(result.narrow),
@@ -255,6 +257,7 @@ def _page_html(payload: dict, asset_prefix: str) -> str:
     after the last completed month — not the rest of the current month unless that month is finished.
     Not an NSE product.
   </section>
+  <section class="data-status" id="dataStatus"></section>
 
   <section class="metrics" id="metrics"></section>
 
@@ -345,6 +348,7 @@ h1 { margin: 4px 0 0; font-size: 28px; font-weight: 650; }
 #industry { min-width: 220px; }
 select, input { background: var(--card); color: var(--text); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; }
 .banner { margin: 16px 24px; padding: 12px 14px; background: #18202a; border: 1px solid var(--line); border-radius: 10px; color: var(--muted); font-size: 13px; }
+.data-status { margin: 0 24px 16px; padding: 10px 14px; border: 1px solid var(--line); border-radius: 10px; color: var(--muted); font-size: 13px; }
 .metrics { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 10px; padding: 0 24px 16px; }
 .metric { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px; }
 .metric span { display: block; color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .08em; }
@@ -429,6 +433,17 @@ function metrics() {
     ["F&O names", m.fo],
     ["NIFTY regime", m.regime || "—"],
   ].map(([k,v]) => `<div class="metric"><span>${k}</span><b>${v}</b></div>`).join("");
+}
+
+function publicationStatus() {
+  const p = DATA.publication || {};
+  const freshness = p.freshness || {};
+  const source = p.source || {};
+  const actual = p.actual_data_date || "unknown";
+  const el = $("dataStatus");
+  if (!el) return;
+  el.textContent = `${freshness.display || "Publication freshness unknown"} · data session ${actual} · source ${source.name || "unknown"}`;
+  if (freshness.status !== "known") el.style.borderColor = "var(--bear)";
 }
 
 function downloads() {
@@ -596,6 +611,7 @@ parseFilters();
 fillDates();
 fillIndustry();
 metrics();
+publicationStatus();
 downloads();
 render();
 """
@@ -609,10 +625,10 @@ def _write_assets(site_dir: Path) -> None:
     (site_dir / ".nojekyll").write_text("", encoding="utf-8")
 
 
-def _write_page(result: ScanResult, dest: Path, dates: List[str], home_href: str, asset_prefix: str) -> None:
+def _write_page(result: ScanResult, dest: Path, dates: List[str], home_href: str, asset_prefix: str, publication: Optional[dict] = None) -> None:
     dest.mkdir(parents=True, exist_ok=True)
     downloads = _write_downloads(result, dest / "downloads")
-    payload = _payload(result, downloads, dates, home_href)
+    payload = _payload(result, downloads, dates, home_href, publication=publication)
     (dest / "index.html").write_text(_page_html(payload, asset_prefix), encoding="utf-8")
     (dest / "manifest.json").write_text(json.dumps({"date": result.date, "metrics": payload["metrics"]}, indent=2), encoding="utf-8")
 
@@ -621,6 +637,8 @@ def build_site(output_dir: Path = Path("cpr_output"), site_dir: Path = SITE_DIR)
     dates = discover_scan_dates(output_dir)
     if not dates:
         raise FileNotFoundError(f"No cpr_full_*.csv files in {output_dir}")
+
+    publication = read_manifest(output_dir) or {}
 
     if site_dir.exists():
         shutil.rmtree(site_dir)
@@ -634,9 +652,9 @@ def build_site(output_dir: Path = Path("cpr_output"), site_dir: Path = SITE_DIR)
         if date == latest and result.weekly.empty:
             result = attach_htf_to_result(result, output_dir=output_dir, write_csv=True)
         if date == latest:
-            _write_page(result, site_dir, dates, home_href="./", asset_prefix="./")
+            _write_page(result, site_dir, dates, home_href="./", asset_prefix="./", publication=publication)
         archive_dir = site_dir / "archive" / date
-        _write_page(result, archive_dir, dates, home_href="../../", asset_prefix="../../")
+        _write_page(result, archive_dir, dates, home_href="../../", asset_prefix="../../", publication=publication)
 
     archive_index = site_dir / "archive" / "index.html"
     links = "\n".join(
@@ -652,6 +670,9 @@ def build_site(output_dir: Path = Path("cpr_output"), site_dir: Path = SITE_DIR)
         encoding="utf-8",
     )
     (site_dir / "archive.json").write_text(json.dumps(dates), encoding="utf-8")
+    (site_dir / "publication_manifest.json").write_text(
+        json.dumps(publication, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
     print(f"✓ Site: {site_dir.resolve()} ({len(dates)} session(s), latest {latest})")
     return dates
 
