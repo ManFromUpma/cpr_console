@@ -41,6 +41,7 @@ from cpr_contract import (
     calculate_cpr_frame,
 )
 from cpr_scoring import SCORE_FIELDS, attach_confirmation_score
+from wide_cpr_strategy import WIDE_FIELDS, attach_wide_strategy, wide_table
 from signal_contract import setup_score
 
 OUTPUT_DIR = Path("cpr_output")
@@ -122,6 +123,7 @@ class ScanResult:
     best: pd.DataFrame = field(default_factory=pd.DataFrame)
     watchlist: pd.DataFrame = field(default_factory=pd.DataFrame)
     follow_through: pd.DataFrame = field(default_factory=pd.DataFrame)
+    wide: pd.DataFrame = field(default_factory=pd.DataFrame)
 
 
 def _nse_session() -> requests.Session:
@@ -1002,6 +1004,10 @@ DISPLAY_COLS = [
     "Signal_Score",
     "Signal_Grade",
     "Signal_Explanation",
+    "Strategy_Type",
+    "Strategy_Setup",
+    "Strategy_Confirmation",
+    "Strategy_Explanation",
 ]
 
 WEB_EXPORT_COLS = [
@@ -1052,6 +1058,10 @@ WEB_EXPORT_COLS = [
     "Signal_Score",
     "Signal_Grade",
     "Signal_Explanation",
+    "Strategy_Type",
+    "Strategy_Setup",
+    "Strategy_Confirmation",
+    "Strategy_Explanation",
     "Next_Close",
     "Follow_Through",
 ]
@@ -1132,10 +1142,13 @@ def load_scan_result(date: str, output_dir: Optional[Path] = None, previous: Opt
             )
     if not set(SCORE_FIELDS).issubset(full.columns):
         full = attach_confirmation_score(full)
+    if not set(WIDE_FIELDS).issubset(full.columns):
+        full = attach_wide_strategy(full)
     _, narrow, bullish, bearish, top20 = split_shortlists(full)
     fo_available = "Segment" in full.columns and bool((full["Segment"] == "F&O + Cash").any())
     best = pd.DataFrame()
     watchlist = pd.DataFrame()
+    wide = pd.DataFrame()
     best_path = output_dir / f"cpr_best_{date}.csv"
     watch_path = output_dir / f"cpr_watchlist_{date}.csv"
     if best_path.exists():
@@ -1146,6 +1159,11 @@ def load_scan_result(date: str, output_dir: Optional[Path] = None, previous: Opt
         watchlist = pd.read_csv(watch_path)
     if watchlist.empty or not set(SCORE_FIELDS).issubset(watchlist.columns):
         watchlist = compute_watchlist(full)
+    wide_path = output_dir / f"cpr_wide_{date}.csv"
+    if wide_path.exists():
+        wide = pd.read_csv(wide_path)
+    if wide.empty or not set(WIDE_FIELDS).issubset(wide.columns):
+        wide = wide_table(full)
     result = ScanResult(
         date=date,
         cash_rows=len(full),
@@ -1158,6 +1176,7 @@ def load_scan_result(date: str, output_dir: Optional[Path] = None, previous: Opt
         output_dir=output_dir,
         best=best,
         watchlist=watchlist,
+        wide=wide,
     )
     weekly_path = output_dir / f"cpr_weekly_{date}.csv"
     monthly_path = output_dir / f"cpr_monthly_{date}.csv"
@@ -1214,6 +1233,10 @@ def compute_best(df: pd.DataFrame, n: int = 25) -> pd.DataFrame:
             "Signal_Score",
             "Signal_Grade",
             "Signal_Explanation",
+            "Strategy_Type",
+            "Strategy_Setup",
+            "Strategy_Confirmation",
+            "Strategy_Explanation",
             "Regime",
         ]
         if c in df.columns
@@ -1263,6 +1286,10 @@ def compute_watchlist(df: pd.DataFrame) -> pd.DataFrame:
             "Signal_Score",
             "Signal_Grade",
             "Signal_Explanation",
+            "Strategy_Type",
+            "Strategy_Setup",
+            "Strategy_Confirmation",
+            "Strategy_Explanation",
             "Regime",
         ]
         if c in df.columns
@@ -1354,6 +1381,10 @@ def split_shortlists(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, pd.D
             "Signal_Score",
             "Signal_Grade",
             "Signal_Explanation",
+            "Strategy_Type",
+            "Strategy_Setup",
+            "Strategy_Confirmation",
+            "Strategy_Explanation",
         ]
         if c in df.columns
     ]
@@ -1388,6 +1419,7 @@ def export_results(
     # Compute after the current-session and higher-timeframe fields available to
     # this export path are attached. Existing setup/filter membership is unchanged.
     df = attach_confirmation_score(df)
+    df = attach_wide_strategy(df)
     full_table, narrow, bullish, bearish, top20 = split_shortlists(df)
 
     full_table.to_csv(output_dir / f"cpr_full_{date}.csv", index=False)
@@ -1400,6 +1432,9 @@ def export_results(
     watchlist = compute_watchlist(df)
     if not watchlist.empty:
         watchlist.to_csv(output_dir / f"cpr_watchlist_{date}.csv", index=False)
+    wide = wide_table(df)
+    if not wide.empty:
+        wide.to_csv(output_dir / f"cpr_wide_{date}.csv", index=False)
     if verbose:
         print(f"✓ Full table: {output_dir / f'cpr_full_{date}.csv'}")
         print(f"✓ Narrow CPR: {len(narrow)} symbols → {output_dir / f'cpr_narrow_{date}.csv'}")
@@ -1409,6 +1444,7 @@ def export_results(
         print(f"✓ Best today: {len(best)} symbols → {output_dir / f'cpr_best_{date}.csv'}")
         if not watchlist.empty:
             print(f"✓ Watchlist: {len(watchlist)} symbols → {output_dir / f'cpr_watchlist_{date}.csv'}")
+        print(f"✓ Wide CPR: {len(wide)} symbols → {output_dir / f'cpr_wide_{date}.csv'}")
 
     return ScanResult(
         date=date,
@@ -1422,6 +1458,7 @@ def export_results(
         output_dir=output_dir,
         best=best,
         watchlist=watchlist,
+        wide=wide,
     )
 
 

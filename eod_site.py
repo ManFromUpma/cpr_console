@@ -81,6 +81,10 @@ TABLE_COLS = [
     "Signal_Score",
     "Signal_Grade",
     "Signal_Explanation",
+    "Strategy_Type",
+    "Strategy_Setup",
+    "Strategy_Confirmation",
+    "Strategy_Explanation",
     "Applies",
     "Follow_Through",
     "Next_Close",
@@ -130,6 +134,8 @@ def _write_downloads(result: ScanResult, dest: Path) -> dict:
         "weekly": ("cpr_weekly.csv", result.weekly),
         "monthly": ("cpr_monthly.csv", result.monthly),
     }
+    if not result.wide.empty:
+        mapping["wide"] = ("cpr_wide.csv", result.wide)
     files = []
     for key, (name, frame) in mapping.items():
         path = dest / name
@@ -168,6 +174,7 @@ def _write_downloads(result: ScanResult, dest: Path) -> dict:
         "watchlist": "downloads/cpr_watchlist.csv",
         "weekly": "downloads/cpr_weekly.csv",
         "monthly": "downloads/cpr_monthly.csv",
+        "wide": "downloads/cpr_wide.csv" if not result.wide.empty else None,
         "zip": f"downloads/{zip_name}",
     }
 
@@ -217,6 +224,7 @@ def _payload(result: ScanResult, downloads: dict, dates: Iterable[str], home_hre
             "top20": _records(result.top20),
             "best": _records(result.best) if not result.best.empty else [],
             "watchlist": _records(result.watchlist) if not result.watchlist.empty else [],
+            "wide": _records(result.wide) if not result.wide.empty else [],
             "follow": _records(result.follow_through) if not result.follow_through.empty else [],
             "weekly": _records(result.weekly) if not result.weekly.empty else [],
             "monthly": _records(result.monthly) if not result.monthly.empty else [],
@@ -297,6 +305,7 @@ def _page_html(payload: dict, asset_prefix: str) -> str:
     <button data-tab="bearish">Bearish</button>
     <button data-tab="top20">Top 20</button>
     <button data-tab="watchlist">Watchlist</button>
+    <button data-tab="wide">Wide CPR</button>
     <button data-tab="follow">Follow-through</button>
     <button data-tab="weekly">Weekly</button>
     <button data-tab="monthly">Monthly</button>
@@ -322,6 +331,7 @@ def _page_html(payload: dict, asset_prefix: str) -> str:
     Weekly / Monthly tabs use the same formulas on completed week and month bars.
     Top 20 ranks liquid setups (median VALUE ≥ ₹2 cr) by confluence then width percentile.
     Follow-through compares each setup’s prior-day CPR band to this session’s close.
+    Wide CPR adds separate consolidation and range-breakout states; it does not replace the existing Narrow CPR setup labels.
   </footer>
   <script>window.CPR_DATA = {data};</script>
   <script src="assets/app.js?v=6"></script>
@@ -386,7 +396,7 @@ footer { padding: 12px 24px 32px; color: var(--muted); font-size: 12px; border-t
 
 JS = r"""
 const DATA = window.CPR_DATA;
-const COLS = ["SYMBOL","Industry","CLOSE","Pivot","BC","TC","CPR_Width_Pct","Width_Rank_Pct","CPR_Class","Own_Narrow","Overlay","Setup","Bias","Price_Position","Segment","History_Days","Value_60d","ATR14","Width_ATR","Value_Ratio","Above_SMA50","Above_SMA100","Regime","Confluence_Score","Signal_Direction","Signal_Score","Signal_Grade","Signal_Explanation","Applies"];
+const COLS = ["SYMBOL","Industry","CLOSE","Pivot","BC","TC","CPR_Width_Pct","Width_Rank_Pct","CPR_Class","Own_Narrow","Overlay","Setup","Bias","Price_Position","Segment","History_Days","Value_60d","ATR14","Width_ATR","Value_Ratio","Above_SMA50","Above_SMA100","Regime","Confluence_Score","Signal_Direction","Signal_Score","Signal_Grade","Signal_Explanation","Strategy_Type","Strategy_Setup","Strategy_Confirmation","Strategy_Explanation","Applies"];
 const FOLLOW_COLS = ["SYMBOL","Industry","Setup","CPR_Width_Pct","Width_Rank_Pct","Segment","Next_Close","Follow_Through"];
 let tab = "best";
 let sort = {col: null, asc: true};
@@ -456,6 +466,7 @@ function downloads() {
     ["Full CSV", d.full],
     ["Best today", d.best],
     ["Watchlist", d.watchlist],
+    ["Wide CPR", d.wide],
     ["Narrow", d.narrow],
     ["Bullish", d.bullish],
     ["Bearish", d.bearish],
@@ -489,6 +500,9 @@ function klass(col, val) {
   if (col === "Setup" && val === "Watch") return "narrow";
   if (col === "Signal_Score" && Number(val) >= 65) return "bull";
   if (col === "Signal_Score" && Number(val) < 50) return "bear";
+  if (col === "Strategy_Confirmation" && val === "Confirmed") return "bull";
+  if (col === "Strategy_Confirmation" && val === "Watch") return "narrow";
+  if (col === "Strategy_Confirmation" && val === "Unavailable") return "bear";
   if (col === "Own_Narrow" && val === true) return "narrow";
   if (col === "Follow_Through" && val === "Followed") return "bull";
   if (col === "Follow_Through" && val === "Failed") return "bear";
