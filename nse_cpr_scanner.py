@@ -40,6 +40,7 @@ from cpr_contract import (
     CPR_WIDE_MIN_PCT,
     calculate_cpr_frame,
 )
+from cpr_scoring import SCORE_FIELDS, attach_confirmation_score
 from signal_contract import setup_score
 
 OUTPUT_DIR = Path("cpr_output")
@@ -997,6 +998,10 @@ DISPLAY_COLS = [
     "Weekly_Signal",
     "Monthly_Signal",
     "Confluence_Score",
+    "Signal_Direction",
+    "Signal_Score",
+    "Signal_Grade",
+    "Signal_Explanation",
 ]
 
 WEB_EXPORT_COLS = [
@@ -1043,6 +1048,10 @@ WEB_EXPORT_COLS = [
     "Weekly_Signal",
     "Monthly_Signal",
     "Confluence_Score",
+    "Signal_Direction",
+    "Signal_Score",
+    "Signal_Grade",
+    "Signal_Explanation",
     "Next_Close",
     "Follow_Through",
 ]
@@ -1121,6 +1130,8 @@ def load_scan_result(date: str, output_dir: Optional[Path] = None, previous: Opt
             full = attach_history_features(
                 full, load_history_panel(hist_dates, output_dir), own_window=HISTORY_LOOKBACK
             )
+    if not set(SCORE_FIELDS).issubset(full.columns):
+        full = attach_confirmation_score(full)
     _, narrow, bullish, bearish, top20 = split_shortlists(full)
     fo_available = "Segment" in full.columns and bool((full["Segment"] == "F&O + Cash").any())
     best = pd.DataFrame()
@@ -1129,11 +1140,11 @@ def load_scan_result(date: str, output_dir: Optional[Path] = None, previous: Opt
     watch_path = output_dir / f"cpr_watchlist_{date}.csv"
     if best_path.exists():
         best = pd.read_csv(best_path)
-    if best.empty:
+    if best.empty or not set(SCORE_FIELDS).issubset(best.columns):
         best = compute_best(full)
     if watch_path.exists():
         watchlist = pd.read_csv(watch_path)
-    if watchlist.empty:
+    if watchlist.empty or not set(SCORE_FIELDS).issubset(watchlist.columns):
         watchlist = compute_watchlist(full)
     result = ScanResult(
         date=date,
@@ -1199,6 +1210,10 @@ def compute_best(df: pd.DataFrame, n: int = 25) -> pd.DataFrame:
             "Bias",
             "Segment",
             "Confluence_Score",
+            "Signal_Direction",
+            "Signal_Score",
+            "Signal_Grade",
+            "Signal_Explanation",
             "Regime",
         ]
         if c in df.columns
@@ -1212,7 +1227,7 @@ def compute_best(df: pd.DataFrame, n: int = 25) -> pd.DataFrame:
     setup_rows = setup_rows.loc[liquid]
     if setup_rows.empty:
         return pd.DataFrame(columns=cols)
-    sort_by = "Confluence_Score" if "Confluence_Score" in setup_rows.columns else "Width_Rank_Pct"
+    sort_by = "Signal_Score" if "Signal_Score" in setup_rows.columns else ("Confluence_Score" if "Confluence_Score" in setup_rows.columns else "Width_Rank_Pct")
     extra = []
     if sort_by in setup_rows.columns:
         setup_rows["_key"] = setup_rows[sort_by].abs()
@@ -1244,6 +1259,10 @@ def compute_watchlist(df: pd.DataFrame) -> pd.DataFrame:
             "Price_Position",
             "Segment",
             "Confluence_Score",
+            "Signal_Direction",
+            "Signal_Score",
+            "Signal_Grade",
+            "Signal_Explanation",
             "Regime",
         ]
         if c in df.columns
@@ -1253,8 +1272,9 @@ def compute_watchlist(df: pd.DataFrame) -> pd.DataFrame:
     rows = df[df["Setup"].isin(WATCHLIST_SETUPS)].copy()
     if rows.empty:
         return pd.DataFrame(columns=cols)
-    if "Confluence_Score" in rows.columns:
-        rows = rows.sort_values(["Confluence_Score"], ascending=False, na_position="last")
+    sort_cols = [c for c in ("Signal_Score", "Confluence_Score") if c in rows.columns]
+    if sort_cols:
+        rows = rows.sort_values(sort_cols, ascending=[False] * len(sort_cols), na_position="last")
     return rows[cols].reset_index(drop=True)
 
 
@@ -1330,6 +1350,10 @@ def split_shortlists(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, pd.D
             "Price_Position",
             "Segment",
             "Confluence_Score",
+            "Signal_Direction",
+            "Signal_Score",
+            "Signal_Grade",
+            "Signal_Explanation",
         ]
         if c in df.columns
     ]
@@ -1361,6 +1385,9 @@ def export_results(
     """Export ranked tables and shortlists."""
     output_dir = Path(output_dir) if output_dir is not None else OUTPUT_DIR
     output_dir.mkdir(exist_ok=True)
+    # Compute after the current-session and higher-timeframe fields available to
+    # this export path are attached. Existing setup/filter membership is unchanged.
+    df = attach_confirmation_score(df)
     full_table, narrow, bullish, bearish, top20 = split_shortlists(df)
 
     full_table.to_csv(output_dir / f"cpr_full_{date}.csv", index=False)

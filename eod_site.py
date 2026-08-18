@@ -77,6 +77,10 @@ TABLE_COLS = [
     "Above_SMA100",
     "Regime",
     "Confluence_Score",
+    "Signal_Direction",
+    "Signal_Score",
+    "Signal_Grade",
+    "Signal_Explanation",
     "Applies",
     "Follow_Through",
     "Next_Close",
@@ -382,7 +386,7 @@ footer { padding: 12px 24px 32px; color: var(--muted); font-size: 12px; border-t
 
 JS = r"""
 const DATA = window.CPR_DATA;
-const COLS = ["SYMBOL","Industry","CLOSE","Pivot","BC","TC","CPR_Width_Pct","Width_Rank_Pct","CPR_Class","Own_Narrow","Overlay","Setup","Bias","Price_Position","Segment","History_Days","Value_60d","ATR14","Width_ATR","Value_Ratio","Above_SMA50","Above_SMA100","Regime","Confluence_Score","Applies"];
+const COLS = ["SYMBOL","Industry","CLOSE","Pivot","BC","TC","CPR_Width_Pct","Width_Rank_Pct","CPR_Class","Own_Narrow","Overlay","Setup","Bias","Price_Position","Segment","History_Days","Value_60d","ATR14","Width_ATR","Value_Ratio","Above_SMA50","Above_SMA100","Regime","Confluence_Score","Signal_Direction","Signal_Score","Signal_Grade","Signal_Explanation","Applies"];
 const FOLLOW_COLS = ["SYMBOL","Industry","Setup","CPR_Width_Pct","Width_Rank_Pct","Segment","Next_Close","Follow_Through"];
 let tab = "best";
 let sort = {col: null, asc: true};
@@ -465,7 +469,7 @@ function downloads() {
 function fmt(col, val) {
   if (val === null || val === undefined) return "—";
   if (col === "CPR_Width_Pct") return Number(val).toFixed(4);
-  if (col === "Width_Rank_Pct" || col === "Confluence_Score") return Number(val).toFixed(2);
+  if (col === "Width_Rank_Pct" || col === "Confluence_Score" || col === "Signal_Score") return Number(val).toFixed(2);
   if (col === "Value_Ratio") return Number(val).toFixed(2);
   if (["CLOSE","Pivot","BC","TC","Value_60d","ATR14","Width_ATR","Next_Close"].includes(col)) return Number(val).toFixed(2);
   if (["Own_Narrow","Nifty500","Above_SMA50","Above_SMA100","History_OK"].includes(col)) return val ? "Yes" : "No";
@@ -483,6 +487,8 @@ function klass(col, val) {
   if (col === "Setup" && (val === "Long" || val === "Watch Long")) return "bull";
   if (col === "Setup" && (val === "Short" || val === "Watch Short")) return "bear";
   if (col === "Setup" && val === "Watch") return "narrow";
+  if (col === "Signal_Score" && Number(val) >= 65) return "bull";
+  if (col === "Signal_Score" && Number(val) < 50) return "bear";
   if (col === "Own_Narrow" && val === true) return "narrow";
   if (col === "Follow_Through" && val === "Followed") return "bull";
   if (col === "Follow_Through" && val === "Failed") return "bear";
