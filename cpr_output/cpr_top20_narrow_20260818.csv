@@ -1,0 +1,3 @@
+SYMBOL,Industry,CLOSE,Pivot,BC,TC,CPR_Width_Pct,Width_Rank_Pct,Overlay,Setup,Own_Narrow,Bias,Price_Position,Segment,Confluence_Score
+VIYASH,Unclassified,254.95,254.94999999999996,254.95,254.94999999999993,2.2295908554935483e-14,0.016666666666666666,Higher,Watch Short,True,Bearish,Inside CPR,Cash Only,-1
+GVPIL,Unclassified,705.05,708.7999999999998,710.675,706.9249999999997,0.5318771718318173,0.25,Lower,Short,True,Bearish,Below CPR,Cash Only,-2
