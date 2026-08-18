@@ -22,7 +22,9 @@ import numpy as np
 import pandas as pd
 import pytz
 
+from cpr_contract import calculate_cpr, calculate_cpr_frame
 from data_provider import _extract_symbol_ohlcv, _yahoo_download_chunked
+from signal_contract import BreakoutSignal, breakout_signal_rank
 from universe import classify_symbol
 
 
@@ -40,30 +42,25 @@ INTRADAY_MAX_DAYS = {
 
 
 def compute_cpr(h: float, l: float, c: float) -> Tuple[float, float, float, float, float]:
-    """Pivot, TC, BC, absolute width, width % of pivot."""
-    p = (h + l + c) / 3.0
-    bc = (h + l) / 2.0
-    tc = 2 * p - bc
-    width = abs(tc - bc)
-    width_pct = (width / p) * 100 if p != 0 else np.nan
-    return p, tc, bc, width, width_pct
+    """Pivot, TC, BC, absolute width, and width % of close."""
+    levels = calculate_cpr(h, l, c)
+    return levels.pivot, levels.tc, levels.bc, levels.width, levels.width_pct
 
 
 def add_cpr_columns(daily: pd.DataFrame) -> pd.DataFrame:
     """Vectorized CPR columns from daily OHLC (lowercase column names)."""
     d = daily.copy()
-    h = pd.to_numeric(d["high"], errors="coerce")
-    l = pd.to_numeric(d["low"], errors="coerce")
-    c = pd.to_numeric(d["close"], errors="coerce")
-    p = (h + l + c) / 3.0
-    bc = (h + l) / 2.0
-    tc = 2 * p - bc
-    width = (tc - bc).abs()
-    d["P"] = p
-    d["TC"] = tc
-    d["BC"] = bc
-    d["width"] = width
-    d["width_pct"] = np.where(p != 0, (width / p) * 100.0, np.nan)
+    canonical = calculate_cpr_frame(
+        d,
+        high_col="high",
+        low_col="low",
+        close_col="close",
+    )
+    d["P"] = canonical["pivot"]
+    d["TC"] = canonical["tc"]
+    d["BC"] = canonical["bc"]
+    d["width"] = canonical["width"]
+    d["width_pct"] = canonical["width_pct"]
     return d.dropna(subset=["P", "TC", "BC", "width_pct"])
 
 
@@ -419,7 +416,7 @@ def _latest_screen_row(
 
     long_hits = day[day["long_entry"] == True]  # noqa: E712
     short_hits = day[day["short_entry"] == True]  # noqa: E712
-    signal = "Watch" if narrow else "None"
+    signal = BreakoutSignal.WATCH.value if narrow else BreakoutSignal.NONE.value
     entry = sl = tp = None
     signal_time = None
     bars_beyond = 0
@@ -429,13 +426,13 @@ def _latest_screen_row(
     side = None
     if not long_hits.empty and not short_hits.empty:
         chosen = long_hits.iloc[0] if long_hits.index[0] <= short_hits.index[0] else short_hits.iloc[0]
-        side = "Long" if long_hits.index[0] <= short_hits.index[0] else "Short"
+        side = BreakoutSignal.LONG.value if long_hits.index[0] <= short_hits.index[0] else BreakoutSignal.SHORT.value
     elif not long_hits.empty:
         chosen = long_hits.iloc[0]
-        side = "Long"
+        side = BreakoutSignal.LONG.value
     elif not short_hits.empty:
         chosen = short_hits.iloc[0]
-        side = "Short"
+        side = BreakoutSignal.SHORT.value
 
     if chosen is not None and side is not None:
         signal = side
@@ -463,9 +460,9 @@ def _latest_screen_row(
     elif not include_watch:
         return None
 
-    if signal == "None":
+    if signal == BreakoutSignal.NONE.value:
         return None
-    if signal == "Watch" and not include_watch:
+    if signal == BreakoutSignal.WATCH.value and not include_watch:
         return None
 
     return ScreenRow(
@@ -541,15 +538,17 @@ def screen_cpr_breakout(
         row = _latest_screen_row(symbol, merged, rr_target, include_watch=True)
         if row is None:
             continue
-        if not include_watch and row.signal not in ("Long", "Short"):
+        if not include_watch and row.signal not in (
+            BreakoutSignal.LONG.value,
+            BreakoutSignal.SHORT.value,
+        ):
             continue
         rows.append(row.to_dict())
 
     if not rows:
         return pd.DataFrame()
     df = pd.DataFrame(rows)
-    rank = {"Long": 0, "Short": 1, "Watch": 2, "None": 3}
-    df["_rank"] = df["Signal"].map(rank).fillna(9)
+    df["_rank"] = df["Signal"].map(breakout_signal_rank).fillna(9)
     df = df.sort_values(["_rank", "Width %"], ascending=[True, True]).drop(columns=["_rank"])
     return df.reset_index(drop=True)
 

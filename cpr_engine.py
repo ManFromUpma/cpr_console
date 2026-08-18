@@ -20,6 +20,12 @@ from typing import List, Dict, Optional, Tuple
 from dataclasses import dataclass
 from enum import Enum
 
+from cpr_contract import (
+    CPR_NARROW_MAX_PCT,
+    CPR_WIDE_MIN_PCT,
+    calculate_cpr as calculate_canonical_cpr,
+)
+
 
 class CPRBias(Enum):
     BULLISH = "Bullish"
@@ -130,8 +136,8 @@ class CPREngine:
     
     def __init__(
         self,
-        narrow_max_pct: float = 0.25,
-        wide_min_pct: float = 0.75,
+        narrow_max_pct: float = CPR_NARROW_MAX_PCT,
+        wide_min_pct: float = CPR_WIDE_MIN_PCT,
         near_cpr_distance_pct: float = 0.5,
         min_price: Optional[float] = None,
         min_volume: Optional[float] = None,
@@ -174,26 +180,7 @@ class CPREngine:
         
         Returns dict with: pivot, bc, tc, cpr_bottom, cpr_top, cpr_width, cpr_width_pct
         """
-        if prev_close <= 0:
-            raise ValueError("Previous close must be positive")
-        
-        pivot = (prev_high + prev_low + prev_close) / 3.0
-        bc = (prev_high + prev_low) / 2.0
-        tc = 2.0 * pivot - bc
-        cpr_top = max(bc, tc)
-        cpr_bottom = min(bc, tc)
-        cpr_width = cpr_top - cpr_bottom
-        cpr_width_pct = (cpr_width / prev_close) * 100.0
-        
-        return {
-            'pivot': pivot,
-            'bc': bc,
-            'tc': tc,
-            'cpr_bottom': cpr_bottom,
-            'cpr_top': cpr_top,
-            'cpr_width': cpr_width,
-            'cpr_width_pct': cpr_width_pct
-        }
+        return calculate_canonical_cpr(prev_high, prev_low, prev_close).as_dict()
     
     def determine_bias(self, pivot: float, bc: float) -> CPRBias:
         """Determine previous-session bias"""

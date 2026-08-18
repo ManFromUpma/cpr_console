@@ -31,7 +31,7 @@ class TestComputeCpr(unittest.TestCase):
         self.assertAlmostEqual(bc, 105.0, places=6)
         self.assertAlmostEqual(tc, 105.6666666667, places=6)
         self.assertAlmostEqual(width, abs(tc - bc), places=6)
-        self.assertAlmostEqual(width_pct, (width / p) * 100, places=6)
+        self.assertAlmostEqual(width_pct, (width / 106) * 100, places=6)
 
 
 class TestNarrowAndMerge(unittest.TestCase):

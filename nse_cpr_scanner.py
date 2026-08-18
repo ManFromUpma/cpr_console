@@ -35,6 +35,13 @@ import numpy as np
 import pandas as pd
 import requests
 
+from cpr_contract import (
+    CPR_NARROW_MAX_PCT,
+    CPR_WIDE_MIN_PCT,
+    calculate_cpr_frame,
+)
+from signal_contract import setup_score
+
 OUTPUT_DIR = Path("cpr_output")
 IST = ZoneInfo("Asia/Kolkata")
 
@@ -79,7 +86,7 @@ MIN_HISTORY_DAYS = 20
 MIN_HISTORY_WEEKS = 12
 MIN_HISTORY_MONTHS = 6
 MIN_VALUE_TOP20 = 20_000_000
-BEARISH_WIDTH_PCT = 0.25
+BEARISH_WIDTH_PCT = CPR_NARROW_MAX_PCT
 SETUP_CUSHION_PCT = 0.20
 ATR_PERIOD = 14
 SMA_FAST = 50
@@ -817,16 +824,14 @@ def _signal_map(frame: pd.DataFrame) -> dict:
     """SYMBOL → signed direction from a Daily/Weekly/Monthly setup list."""
     if frame.empty or "Setup" not in frame.columns:
         return {}
-    dirs = {"Long": 2, "Watch Long": 1, "Short": -2, "Watch Short": -1}
     return {
-        sym: dirs.get(s, 0)
+        sym: setup_score(s)
         for sym, s in zip(frame["SYMBOL"].astype(str).str.upper(), frame["Setup"])
     }
 
 
 def setup_signal(setup: str) -> int:
-    dirs = {"Long": 2, "Watch Long": 1, "Short": -2, "Watch Short": -1}
-    return dirs.get(setup, 0)
+    return setup_score(setup)
 
 
 def attach_confluence(
@@ -900,34 +905,24 @@ def compute_cpr(df: pd.DataFrame) -> pd.DataFrame:
     for col in ["OPEN", "HIGH", "LOW", "CLOSE"]:
         out[col] = pd.to_numeric(out[col], errors="coerce")
 
-    out["Pivot"] = (out["HIGH"] + out["LOW"] + out["CLOSE"]) / 3
-    out["BC"] = (out["HIGH"] + out["LOW"]) / 2
-    out["TC"] = 2 * out["Pivot"] - out["BC"]
-
-    out["CPR_Top"] = out[["BC", "TC"]].max(axis=1)
-    out["CPR_Bottom"] = out[["BC", "TC"]].min(axis=1)
-
-    out["CPR_Width"] = out["CPR_Top"] - out["CPR_Bottom"]
-    out["CPR_Width_Pct"] = (out["CPR_Width"] / out["CLOSE"]) * 100
-
-    out["CPR_Class"] = pd.cut(
-        out["CPR_Width_Pct"],
-        bins=[0, 0.25, 0.75, np.inf],
-        labels=["Narrow", "Moderate", "Wide"],
-        include_lowest=True,
+    canonical = calculate_cpr_frame(
+        out,
+        high_col="HIGH",
+        low_col="LOW",
+        close_col="CLOSE",
+        narrow_max_pct=CPR_NARROW_MAX_PCT,
+        wide_min_pct=CPR_WIDE_MIN_PCT,
     )
-
-    out["Bias"] = np.where(
-        out["Pivot"] > out["BC"],
-        "Bullish",
-        np.where(out["Pivot"] < out["BC"], "Bearish", "Neutral"),
-    )
-
-    out["Price_Position"] = np.where(
-        out["CLOSE"] > out["CPR_Top"],
-        "Above CPR",
-        np.where(out["CLOSE"] < out["CPR_Bottom"], "Below CPR", "Inside CPR"),
-    )
+    out["Pivot"] = canonical["pivot"]
+    out["BC"] = canonical["bc"]
+    out["TC"] = canonical["tc"]
+    out["CPR_Top"] = canonical["top"]
+    out["CPR_Bottom"] = canonical["bottom"]
+    out["CPR_Width"] = canonical["width"]
+    out["CPR_Width_Pct"] = canonical["width_pct"]
+    out["CPR_Class"] = canonical["width_class"]
+    out["Bias"] = canonical["bias"]
+    out["Price_Position"] = canonical["price_position"]
     return out
 
 
@@ -953,12 +948,12 @@ def apply_bullish_cpr_filters(df: pd.DataFrame) -> pd.DataFrame:
     out["Bullish_CPR"] = (
         (out["CLOSE"] > out["CPR_Top"])
         & (out["Pivot"] > out["BC"])
-        & (out["CPR_Width_Pct"] < 0.25)
+        & (out["CPR_Width_Pct"] <= CPR_NARROW_MAX_PCT)
     )
     out["Bearish_CPR"] = (
         (out["CLOSE"] < out["CPR_Bottom"])
         & (out["Pivot"] < out["BC"])
-        & (out["CPR_Width_Pct"] < BEARISH_WIDTH_PCT)
+        & (out["CPR_Width_Pct"] <= BEARISH_WIDTH_PCT)
     )
     return out
 
