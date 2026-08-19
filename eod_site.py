@@ -275,6 +275,19 @@ def _page_html(payload: dict, asset_prefix: str) -> str:
 
   <section class="downloads" id="downloads"></section>
 
+  <section class="local-tools" aria-label="Browser-local tools">
+    <div>
+      <p class="kicker">Personal workspace</p>
+      <p class="local-tool-copy">Watchlists, saved views, and alerts stay in this browser. They are not sent to the server.</p>
+    </div>
+    <div class="local-actions">
+      <button id="saveViewButton" type="button">Save current view</button>
+      <button id="manageAlertsButton" type="button">Alert rules</button>
+      <button id="alertCenterButton" type="button">Alerts <span id="alertCount" class="tool-count">0</span></button>
+    </div>
+  </section>
+  <section id="localPanel" class="local-panel" hidden aria-live="polite"></section>
+
   <section class="toolbar">
     <input id="search" type="search" placeholder="Search symbol…" autocomplete="off"/>
     <select id="segment"><option value="Any">Any segment</option><option>F&amp;O + Cash</option><option>Cash Only</option></select>
@@ -305,6 +318,7 @@ def _page_html(payload: dict, asset_prefix: str) -> str:
     <button data-tab="bearish">Bearish</button>
     <button data-tab="top20">Top 20</button>
     <button data-tab="watchlist">Watchlist</button>
+    <button data-tab="mylist">My list <span id="myListCount" class="tab-count">0</span></button>
     <button data-tab="wide">Wide CPR</button>
     <button data-tab="follow">Follow-through</button>
     <button data-tab="weekly">Weekly</button>
@@ -385,6 +399,20 @@ select, input { background: var(--card); color: var(--text); border: 1px solid v
 .downloads { display: flex; flex-wrap: wrap; gap: 8px; padding: 0 24px 16px; }
 .downloads a { color: var(--bg); background: var(--accent); text-decoration: none; padding: 8px 12px; border-radius: 999px; font-size: 13px; font-weight: 600; }
 .downloads a.zip { background: var(--bull); }
+.local-tools { display: flex; justify-content: space-between; align-items: center; gap: 16px; margin: 0 24px 12px; padding: 12px 14px; background: #18202a; border: 1px solid var(--line); border-radius: 10px; }
+.local-tool-copy { margin: 3px 0 0; color: var(--muted); font-size: 12px; }
+.local-actions { display: flex; flex-wrap: wrap; gap: 8px; justify-content: flex-end; }
+.local-actions button, .local-panel button, .drawer-action { background: var(--card); color: var(--text); border: 1px solid var(--line); border-radius: 8px; padding: 7px 10px; cursor: pointer; }
+.local-actions button:hover, .local-actions button:focus-visible, .local-panel button:hover, .local-panel button:focus-visible, .drawer-action:hover, .drawer-action:focus-visible { border-color: var(--accent); color: var(--accent); }
+.tool-count, .tab-count { display: inline-flex; min-width: 20px; justify-content: center; padding: 1px 5px; border-radius: 999px; background: var(--accent); color: var(--bg); font-size: 11px; font-weight: 700; }
+.local-panel { margin: 0 24px 12px; padding: 14px; background: var(--card); border: 1px solid var(--line); border-radius: 10px; }
+.local-panel h3 { margin: 0 0 8px; font-size: 13px; }
+.local-panel p { margin: 4px 0; color: var(--muted); font-size: 12px; }
+.local-panel .panel-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; border-top: 1px solid var(--line); padding: 8px 0; }
+.local-panel .panel-row:first-child { border-top: 0; }
+.local-panel .panel-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+.local-panel .alert-match { color: var(--text); }
+.watch-star { color: var(--accent); font-weight: 700; margin-right: 4px; }
 .toolbar { display: flex; flex-wrap: wrap; gap: 8px; padding: 0 24px 10px; }
 .toolbar input { min-width: 220px; flex: 1; }
 .tabs { display: flex; gap: 6px; padding: 0 24px; }
@@ -436,6 +464,8 @@ footer { padding: 12px 24px 32px; color: var(--muted); font-size: 12px; border-t
   .metrics { grid-template-columns: repeat(2, 1fr); }
   .top { flex-direction: column; align-items: start; }
   .symbol-drawer { width: 100vw; padding: 18px; }
+  .local-tools { align-items: flex-start; flex-direction: column; margin-left: 18px; margin-right: 18px; }
+  .local-actions { justify-content: flex-start; }
 }
 """
 
@@ -469,6 +499,163 @@ function badgeClass(value) {
 function badgeHtml(value) {
   const label = value === null || value === undefined || value === "" ? "—" : value;
   return `<span class="badge ${badgeClass(label)}">${esc(label)}</span>`;
+}
+
+const LOCAL_KEYS = { watchlist: "cprConsole.watchlist.v1", views: "cprConsole.views.v1", alerts: "cprConsole.alertRules.v1", dismissed: "cprConsole.dismissedAlerts.v1" };
+let localPanelMode = null;
+
+function readLocal(key, fallback) {
+  try {
+    const raw = window.localStorage.getItem(key);
+    return raw ? JSON.parse(raw) : fallback;
+  } catch (e) { return fallback; }
+}
+
+function writeLocal(key, value) {
+  try { window.localStorage.setItem(key, JSON.stringify(value)); return true; }
+  catch (e) { loadingStatus("Browser-local storage is unavailable; workspace changes were not saved.", true); return false; }
+}
+
+function watchedSymbols() {
+  const value = readLocal(LOCAL_KEYS.watchlist, []);
+  return new Set(Array.isArray(value) ? value.map(v => String(v).toUpperCase()) : []);
+}
+
+function isWatched(symbol) { return watchedSymbols().has(String(symbol || "").toUpperCase()); }
+
+function toggleWatchlist(symbol) {
+  const normalized = String(symbol || "").trim().toUpperCase();
+  if (!normalized) return;
+  const set = watchedSymbols();
+  if (set.has(normalized)) set.delete(normalized); else set.add(normalized);
+  writeLocal(LOCAL_KEYS.watchlist, Array.from(set).sort());
+  renderLocalPanel();
+  render();
+  updateDrawerAction(normalized);
+}
+
+function currentFilters() {
+  return { tab, q: $("search").value, seg: $("segment").value, ind: $("industry").value, cls: $("klass").value, bias: $("bias").value, ovl: $("overlay").value, setup: $("setup").value, nn: $("ownNarrow").value, nifty: $("niftyOnly").checked, hide: $("hideUnclassified").checked };
+}
+
+function applyView(view) {
+  if (!view) return;
+  const map = [["search", view.q], ["segment", view.seg], ["industry", view.ind], ["klass", view.cls], ["bias", view.bias], ["overlay", view.ovl], ["setup", view.setup], ["ownNarrow", view.nn]];
+  map.forEach(([id, value]) => { if (value !== undefined && $(id)) $(id).value = value; });
+  $("niftyOnly").checked = Boolean(view.nifty);
+  $("hideUnclassified").checked = Boolean(view.hide);
+  if (view.tab && document.querySelector(`.tabs button[data-tab="${view.tab}"]`)) {
+    document.querySelectorAll(".tabs button").forEach(b => b.classList.remove("on"));
+    document.querySelector(`.tabs button[data-tab="${view.tab}"]`).classList.add("on");
+    tab = view.tab;
+  }
+  render();
+}
+
+function saveCurrentView() {
+  const name = window.prompt("Name this view:");
+  if (!name || !name.trim()) return;
+  const views = readLocal(LOCAL_KEYS.views, []);
+  const next = views.filter(v => v.name !== name.trim());
+  next.push({ name: name.trim(), ...currentFilters(), savedAt: new Date().toISOString() });
+  writeLocal(LOCAL_KEYS.views, next.slice(-20));
+  localPanelMode = "views";
+  renderLocalPanel();
+}
+
+function alertRules() {
+  const value = readLocal(LOCAL_KEYS.alerts, []);
+  return Array.isArray(value) ? value : [];
+}
+
+function addAlertRule() {
+  const type = (window.prompt("Alert type: confirmed, wide-confirmed, score, setup, or cpr-class", "confirmed") || "").trim().toLowerCase();
+  const allowed = new Set(["confirmed", "wide-confirmed", "score", "setup", "cpr-class"]);
+  if (!allowed.has(type)) { loadingStatus("Unknown alert type. Use confirmed, wide-confirmed, score, setup, or cpr-class.", true); return; }
+  const symbol = (window.prompt("Optional symbol (blank = any):", "") || "").trim().toUpperCase();
+  let value = "";
+  if (type === "score") value = Number(window.prompt("Minimum Signal_Score:", "70"));
+  if (type === "setup") value = (window.prompt("Setup label:", "Long") || "").trim();
+  if (type === "cpr-class") value = (window.prompt("CPR class:", "Wide") || "").trim();
+  if (type === "score" && !Number.isFinite(value)) { loadingStatus("Score threshold must be numeric.", true); return; }
+  const label = window.prompt("Rule name:", `${type}${symbol ? ` · ${symbol}` : ""}`) || `${type}${symbol ? ` · ${symbol}` : ""}`;
+  const rules = alertRules();
+  rules.push({ id: `${Date.now()}-${Math.random().toString(16).slice(2)}`, name: label.trim(), type, symbol, value, enabled: true, createdAt: new Date().toISOString() });
+  writeLocal(LOCAL_KEYS.alerts, rules.slice(-30));
+  localPanelMode = "alerts";
+  renderLocalPanel();
+}
+
+function alertMatches(rule, row) {
+  if (!rule || rule.enabled === false || !row) return false;
+  if (rule.symbol && String(row.SYMBOL || "").toUpperCase() !== String(rule.symbol).toUpperCase()) return false;
+  if (rule.type === "confirmed") return row.Strategy_Confirmation === "Confirmed";
+  if (rule.type === "wide-confirmed") return row.Strategy_Type === "Wide CPR" && row.Strategy_Confirmation === "Confirmed";
+  if (rule.type === "score") return Number(row.Signal_Score) >= Number(rule.value);
+  if (rule.type === "setup") return row.Setup === rule.value;
+  if (rule.type === "cpr-class") return row.CPR_Class === rule.value;
+  return false;
+}
+
+function dismissedKeys() {
+  const value = readLocal(LOCAL_KEYS.dismissed, []);
+  return new Set(Array.isArray(value) ? value : []);
+}
+
+function currentAlerts() {
+  const dismissed = dismissedKeys();
+  const rows = DATA && DATA.tables ? (DATA.tables.full || []) : [];
+  const out = [];
+  alertRules().forEach(rule => rows.forEach(row => {
+    if (!alertMatches(rule, row)) return;
+    const key = `${DATA.date}:${rule.id}:${row.SYMBOL}`;
+    if (!dismissed.has(key)) out.push({ key, rule, row });
+  }));
+  return out;
+}
+
+function dismissAlert(key) {
+  const keys = dismissedKeys();
+  keys.add(key);
+  writeLocal(LOCAL_KEYS.dismissed, Array.from(keys).slice(-500));
+  renderLocalPanel();
+}
+
+function deleteAlertRule(id) {
+  writeLocal(LOCAL_KEYS.alerts, alertRules().filter(rule => rule.id !== id));
+  renderLocalPanel();
+}
+
+function renderLocalPanel() {
+  const watch = watchedSymbols();
+  const views = readLocal(LOCAL_KEYS.views, []);
+  const rules = alertRules();
+  const matches = currentAlerts();
+  $("myListCount").textContent = String(watch.size);
+  $("alertCount").textContent = String(matches.length);
+  const panel = $("localPanel");
+  if (!panel) return;
+  if (!localPanelMode) { panel.hidden = true; return; }
+  panel.hidden = false;
+  if (localPanelMode === "views") {
+    panel.innerHTML = `<h3>Saved views</h3><p>Views are stored only in this browser.</p>${views.length ? views.map((v, i) => `<div class="panel-row"><span>${esc(v.name)}</span><div class="panel-actions"><button type="button" data-view-index="${i}">Apply</button><button type="button" data-delete-view="${i}">Delete</button></div></div>`).join("") : "<p>No saved views yet.</p>"}`;
+    panel.querySelectorAll("[data-view-index]").forEach(button => button.addEventListener("click", () => applyView(views[Number(button.dataset.viewIndex)])));
+    panel.querySelectorAll("[data-delete-view]").forEach(button => button.addEventListener("click", () => { const next = views.slice(); next.splice(Number(button.dataset.deleteView), 1); writeLocal(LOCAL_KEYS.views, next); renderLocalPanel(); }));
+    return;
+  }
+  if (localPanelMode === "alerts") {
+    panel.innerHTML = `<h3>Alert rules</h3><p>Rules evaluate the currently loaded completed-session dataset. They do not run in the background.</p><div class="panel-actions"><button id="addAlertRule" type="button">Add rule</button></div>${rules.length ? rules.map(rule => `<div class="panel-row"><span>${esc(rule.name)} · ${esc(rule.type)}${rule.symbol ? ` · ${esc(rule.symbol)}` : ""}</span><button type="button" data-delete-rule="${esc(rule.id)}">Delete</button></div>`).join("") : "<p>No alert rules yet.</p>"}`;
+    $("addAlertRule").addEventListener("click", addAlertRule);
+    panel.querySelectorAll("[data-delete-rule]").forEach(button => button.addEventListener("click", () => deleteAlertRule(button.dataset.deleteRule)));
+    return;
+  }
+  panel.innerHTML = `<h3>Current alerts · ${esc(DATA.date)}</h3><p>Matches are based on this published session and can be dismissed locally.</p>${matches.length ? matches.map(item => `<div class="panel-row alert-match"><span><strong>${esc(item.row.SYMBOL)}</strong> · ${esc(item.rule.name)} · ${esc(item.row.Strategy_Explanation || item.row.Signal_Explanation || "Match")}</span><button type="button" data-dismiss-alert="${esc(item.key)}">Dismiss</button></div>`).join("") : "<p>No active matches for this session.</p>"}`;
+  panel.querySelectorAll("[data-dismiss-alert]").forEach(button => button.addEventListener("click", () => dismissAlert(button.dataset.dismissAlert)));
+}
+
+function updateDrawerAction(symbol) {
+  const button = $("drawerWatchButton");
+  if (button) button.textContent = isWatched(symbol) ? "Remove from My list" : "Add to My list";
 }
 
 function fillIndustry() {
@@ -557,6 +744,7 @@ function fmt(col, val) {
 
 function cellHtml(col, val) {
   const rendered = fmt(col, val);
+  if (col === "SYMBOL") return `${isWatched(val) ? '<span class="watch-star" title="In My list">★</span>' : ""}${esc(rendered)}`;
   return col === "Strategy_Confirmation" ? badgeHtml(rendered) : esc(rendered);
 }
 
@@ -611,7 +799,8 @@ function rows() {
   const ownNarrow = $("ownNarrow").value;
   const niftyOnly = $("niftyOnly").checked;
   const hideUncl = $("hideUnclassified").checked;
-  return (DATA.tables[tab] || []).filter(r => {
+  const source = tab === "mylist" ? (DATA.tables.full || []).filter(r => isWatched(r.SYMBOL)) : (DATA.tables[tab] || []);
+  return source.filter(r => {
     if (q && !(String(r.SYMBOL || "").toUpperCase().includes(q))) return false;
     if (segment !== "Any" && r.Segment !== segment) return false;
     if (industry !== "Any" && r.Industry !== industry) return false;
@@ -697,12 +886,15 @@ function openDrawer(row, trigger) {
         ${detailItem("Trend", `${row.Above_SMA50 === true ? "Above" : row.Above_SMA50 === false ? "Below" : "—"} SMA50 · ${row.Above_SMA100 === true ? "Above" : row.Above_SMA100 === false ? "Below" : "—"} SMA100`)}
       </div>
     </section>
+    <section class="drawer-section drawer-actions"><button id="drawerWatchButton" class="drawer-action" type="button"></button></section>
     <section class="drawer-section">
       <h3>Explanation</h3>
       <p class="drawer-explanation">${esc(row.Strategy_Explanation || row.Signal_Explanation || "No explanation available.")}</p>
     </section>`;
   $("drawerBackdrop").hidden = false;
   $("symbolDrawer").hidden = false;
+  updateDrawerAction(row.SYMBOL);
+  $("drawerWatchButton").addEventListener("click", () => toggleWatchlist(row.SYMBOL));
   document.body.classList.add("drawer-open");
   $("drawerClose").focus();
 }
@@ -724,6 +916,7 @@ function render() {
   if (tab === "follow") extra = " · prior-day setups vs this session's close";
   if (tab === "watchlist") extra = " · every setup with levels to trade next session";
   if (tab === "best") extra = " · Daily Long/Short ranked by confluence, liquid, F&O first";
+  if (tab === "mylist") extra = " · symbols saved in this browser";
   $("count").textContent = `${data.length} rows${extra}`;
   const cols = tab === "follow" ? FOLLOW_COLS : COLS;
   $("head").innerHTML = "<tr>" + cols.map(c =>
@@ -767,6 +960,9 @@ function syncUrl() {
 }
 
 $("drawerClose").addEventListener("click", closeDrawer);
+$("saveViewButton").addEventListener("click", () => { localPanelMode = localPanelMode === "views" ? null : "views"; renderLocalPanel(); });
+$("manageAlertsButton").addEventListener("click", () => { localPanelMode = localPanelMode === "alerts" ? null : "alerts"; renderLocalPanel(); });
+$("alertCenterButton").addEventListener("click", () => { localPanelMode = localPanelMode === "center" ? null : "center"; renderLocalPanel(); });
 $("drawerBackdrop").addEventListener("click", closeDrawer);
 document.addEventListener("keydown", event => { if (event.key === "Escape" && !$("symbolDrawer").hidden) closeDrawer(); });
 document.querySelectorAll(".tabs button").forEach(btn => {
@@ -807,6 +1003,7 @@ async function boot() {
     metrics();
     publicationStatus();
     downloads();
+    renderLocalPanel();
     render();
   } catch (error) {
     loadingStatus(`Unable to load session data: ${error.message || error}`, true);
