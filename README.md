@@ -144,6 +144,18 @@ In the "Screening Filters" section:
 
 ---
 
+## 🧠 Professional Expert Review
+
+The repository includes a review-only professional expertise agent that evaluates architecture, data quality, CPR/timeframe correctness, look-ahead protection, backtesting assumptions, efficiency, testing, CI/publication, security, and AI transparency. It does not fetch live market data, place trades, modify source files, or deploy anything.
+
+Run it from the repository root:
+
+```bash
+python3 run_expert_review.py .
+```
+
+This writes `expert_review_report.md` and `expert_review_evidence.json`. The evidence collector summarizes generated CSV archives instead of sending their full contents into analysis. Findings include severity, confidence, affected files, evidence, recommendations, effort, priority, and acceptance criteria. See `EXPERT_REVIEW_AGENT.md` for details. The implemented hardening is documented in `TECHNICAL_HARDENING_DOCUMENTATION.md` and `LAYMAN_HARDENING_GUIDE.md`.
+
 ## 🧪 Testing
 
 Run unit tests:

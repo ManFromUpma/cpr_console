@@ -41,9 +41,9 @@ INTRADAY_MAX_DAYS = {
 }
 
 
-def compute_cpr(h: float, l: float, c: float) -> Tuple[float, float, float, float, float]:
+def compute_cpr(high: float, low: float, close: float) -> Tuple[float, float, float, float, float]:
     """Pivot, TC, BC, absolute width, and width % of close."""
-    levels = calculate_cpr(h, l, c)
+    levels = calculate_cpr(high, low, close)
     return levels.pivot, levels.tc, levels.bc, levels.width, levels.width_pct
 
 
@@ -187,85 +187,116 @@ def simulate_trades(
     risk_pct: float = 0.01,
     capital: float = 100000.0,
     cost_bps: float = 5.0,
+    slippage_bps: float = 0.0,
     eod_flat: time = EOD_FLAT,
+    ambiguous_policy: str = "stop_first",
 ) -> Tuple[pd.DataFrame, pd.DataFrame, float]:
-    """Event-loop backtest: first daily signal, SL at opposite band, RR target, 15:15 flat."""
+    """Backtest first daily signal with explicit conservative execution assumptions.
+
+    ``cost_bps`` is the existing round-trip cost allowance. ``slippage_bps`` is
+    applied on both entry and exit: adverse for the trade direction. If a bar
+    touches both stop and target, ``ambiguous_policy`` chooses ``stop_first``
+    (the conservative default) or ``target_first``. If a bar opens beyond a
+    stop/target, the open is used as the gap fill rather than the requested level.
+    """
+    if rr_target <= 0 or risk_pct <= 0 or capital <= 0:
+        raise ValueError("rr_target, risk_pct, and capital must be positive")
+    if cost_bps < 0 or slippage_bps < 0:
+        raise ValueError("cost_bps and slippage_bps cannot be negative")
+    if ambiguous_policy not in {"stop_first", "target_first"}:
+        raise ValueError("ambiguous_policy must be 'stop_first' or 'target_first'")
+
+    slip = slippage_bps / 10000.0
     trades: List[Dict] = []
     equity_curve: List[Dict] = []
     position = 0
-    entry_price = entry_time = sl = tp = None
+    entry_price = entry_raw = entry_time = sl = tp = None
     equity = float(capital)
+
+    def adverse_entry(raw: float, side: int) -> float:
+        return raw * (1.0 + slip) if side == 1 else raw * (1.0 - slip)
+
+    def adverse_exit(raw: float, side: int) -> float:
+        return raw * (1.0 - slip) if side == 1 else raw * (1.0 + slip)
 
     for ts, row in merged.iterrows():
         equity_curve.append({"time": ts, "equity": equity})
         bar_t = _bar_time(ts)
 
-        if position == 1:
-            hit_sl = row["low"] <= sl
-            hit_tp = row["high"] >= tp
+        if position in (1, -1):
+            is_long = position == 1
+            hit_sl = bool(row["low"] <= sl) if is_long else bool(row["high"] >= sl)
+            hit_tp = bool(row["high"] >= tp) if is_long else bool(row["low"] <= tp)
+            raw_open = float(row["open"]) if pd.notna(row.get("open")) else None
+            gap_sl = (raw_open is not None and raw_open <= sl) if is_long else (raw_open is not None and raw_open >= sl)
+            gap_tp = (raw_open is not None and raw_open >= tp) if is_long else (raw_open is not None and raw_open <= tp)
             hit_eod = bar_t >= eod_flat
-            if hit_sl or hit_tp or hit_eod:
-                exit_p = sl if hit_sl else (tp if hit_tp else float(row["close"]))
-                risk_frac = (entry_price - sl) / entry_price if entry_price else 0.0
-                pnl = (exit_p - entry_price) / entry_price - cost_bps / 10000.0
-                if risk_frac > 0:
-                    equity *= 1 + pnl * (risk_pct / risk_frac)
-                trades.append(
-                    {
-                        "entry_time": entry_time,
-                        "exit_time": ts,
-                        "side": "long",
-                        "entry": entry_price,
-                        "exit": exit_p,
-                        "sl": sl,
-                        "tp": tp,
-                        "pnl_pct": pnl * 100,
-                        "width_pct": float(row["width_pct"]) if pd.notna(row["width_pct"]) else np.nan,
-                    }
-                )
-                position = 0
+            ambiguous = hit_sl and hit_tp
 
-        elif position == -1:
-            hit_sl = row["high"] >= sl
-            hit_tp = row["low"] <= tp
-            hit_eod = bar_t >= eod_flat
-            if hit_sl or hit_tp or hit_eod:
-                exit_p = sl if hit_sl else (tp if hit_tp else float(row["close"]))
-                risk_frac = (sl - entry_price) / entry_price if entry_price else 0.0
-                pnl = (entry_price - exit_p) / entry_price - cost_bps / 10000.0
+            reason = None
+            if gap_sl:
+                exit_raw, reason = raw_open, "stop_gap"
+            elif gap_tp:
+                exit_raw, reason = raw_open, "target_gap"
+            elif ambiguous:
+                if ambiguous_policy == "stop_first":
+                    exit_raw, reason = sl, "stop_first_ambiguous"
+                else:
+                    exit_raw, reason = tp, "target_first_ambiguous"
+            elif hit_sl:
+                exit_raw, reason = sl, "stop"
+            elif hit_tp:
+                exit_raw, reason = tp, "target"
+            elif hit_eod:
+                exit_raw, reason = float(row["close"]), "eod_flat"
+
+            if reason is not None:
+                exit_p = adverse_exit(float(exit_raw), position)
+                risk_frac = ((entry_price - sl) / entry_price) if is_long and entry_price else ((sl - entry_price) / entry_price if entry_price else 0.0)
+                gross_pnl = ((exit_p - entry_price) / entry_price) if is_long else ((entry_price - exit_p) / entry_price)
+                pnl = gross_pnl - cost_bps / 10000.0
                 if risk_frac > 0:
                     equity *= 1 + pnl * (risk_pct / risk_frac)
                 trades.append(
                     {
                         "entry_time": entry_time,
                         "exit_time": ts,
-                        "side": "short",
+                        "side": "long" if is_long else "short",
                         "entry": entry_price,
+                        "entry_raw": entry_raw,
                         "exit": exit_p,
+                        "exit_raw": float(exit_raw),
                         "sl": sl,
                         "tp": tp,
                         "pnl_pct": pnl * 100,
                         "width_pct": float(row["width_pct"]) if pd.notna(row["width_pct"]) else np.nan,
+                        "exit_reason": reason,
+                        "ambiguous_bar": bool(ambiguous),
+                        "gap_exit": reason.endswith("_gap"),
+                        "slippage_bps": float(slippage_bps),
+                        "cost_bps": float(cost_bps),
                     }
                 )
                 position = 0
 
         if position == 0:
             if bool(row.get("long_entry")):
-                entry_price = float(row["close"])
+                entry_raw = float(row["close"])
+                entry_price = adverse_entry(entry_raw, 1)
                 risk = entry_price - float(row["BC"])
                 if risk > 0:
                     position = 1
                     entry_time = ts
-                    sl = entry_price - risk
+                    sl = float(row["BC"])
                     tp = entry_price + rr_target * risk
             elif bool(row.get("short_entry")):
-                entry_price = float(row["close"])
+                entry_raw = float(row["close"])
+                entry_price = adverse_entry(entry_raw, -1)
                 risk = float(row["TC"]) - entry_price
                 if risk > 0:
                     position = -1
                     entry_time = ts
-                    sl = entry_price + risk
+                    sl = float(row["TC"])
                     tp = entry_price - rr_target * risk
 
     return pd.DataFrame(trades), pd.DataFrame(equity_curve), equity
@@ -564,6 +595,8 @@ def backtest_cpr_breakout(
     risk_pct: float = 0.01,
     capital: float = 100000.0,
     cost_bps: float = 5.0,
+    slippage_bps: float = 0.0,
+    ambiguous_policy: str = "stop_first",
     interval: str = "15m",
     session_timezone: str = SESSION_TZ,
 ) -> Dict:
@@ -631,8 +664,14 @@ def backtest_cpr_breakout(
         risk_pct=risk_pct,
         capital=capital,
         cost_bps=cost_bps,
+        slippage_bps=slippage_bps,
+        ambiguous_policy=ambiguous_policy,
     )
     result = _summarize_trades(tdf, equity, capital, symbol)
+    result["cost_bps"] = float(cost_bps)
+    result["slippage_bps"] = float(slippage_bps)
+    result["ambiguous_policy"] = ambiguous_policy
+    result["execution_policy"] = "Gap fills at open; same-bar collisions use the selected policy"
     result["interval"] = interval
     result["start"] = start_day.isoformat()
     result["end"] = end_day.isoformat()

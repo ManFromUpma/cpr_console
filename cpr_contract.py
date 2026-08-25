@@ -17,6 +17,12 @@ import pandas as pd
 CPR_NARROW_MAX_PCT = 0.25
 CPR_WIDE_MIN_PCT = 0.75
 
+# Both NSE bhavcopies and the Yahoo path are treated as unadjusted OHLC inputs.
+# This is a research-data policy, not a claim that unadjusted prices are always
+# preferable. A future adjusted-price workflow must use a separate, explicit mode.
+PRICE_ADJUSTMENT_POLICY = "unadjusted_ohlc"
+DATA_POLICY_VERSION = 1
+
 
 @dataclass(frozen=True)
 class CPRLevels:

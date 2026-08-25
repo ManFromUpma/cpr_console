@@ -10,6 +10,7 @@ from zoneinfo import ZoneInfo
 import pandas as pd
 
 from eod_site import build_site
+from publication_contract import build_manifest, write_manifest
 from nse_cpr_scanner import (
     apply_bullish_cpr_filters,
     compute_cpr,
@@ -55,6 +56,17 @@ class TestSiteBuild(unittest.TestCase):
             out = Path(tmp) / "out"
             site = Path(tmp) / "site"
             export_results(cash, "20260813", output_dir=out)
+            write_manifest(
+                out,
+                build_manifest(
+                    out,
+                    requested_date="20260813",
+                    actual_date="20260813",
+                    attempted_dates=["20260813"],
+                    source_mode="requested_session",
+                    lookback=252,
+                ),
+            )
             loaded = load_scan_result("20260813", output_dir=out)
             self.assertEqual(loaded.cash_rows, 2)
             dates = build_site(out, site)
@@ -102,6 +114,9 @@ class TestSiteBuild(unittest.TestCase):
             self.assertIn("Unclassified", html)
             self.assertIn('id="dataStatus"', html)
             self.assertIn("data session", (site / "assets" / "app.js").read_text(encoding="utf-8"))
+            self.assertIn("price_adjustment_policy", payload["publication"]["source"])
+            self.assertIn("complete", payload["publication"]["history"])
+            self.assertIn("policy unknown", (site / "assets" / "app.js").read_text(encoding="utf-8"))
             self.assertTrue((site / "publication_manifest.json").exists())
 
 

@@ -99,6 +99,28 @@ class TestPublicationContract(unittest.TestCase):
             self.assertEqual((destination / "new.txt").read_text(encoding="utf-8"), "new")
             self.assertFalse(staging.exists())
 
+    def test_manifest_includes_provenance_and_history_quality(self):
+        with TemporaryDirectory() as tmp:
+            output = Path(tmp)
+            self._write_daily(output)
+            (output / "bhavcopy").mkdir()
+            (output / "bhavcopy" / "cm_20260813.csv").write_text("SYMBOL,HIGH,LOW,CLOSE\nAAA,1,1,1\n", encoding="utf-8")
+            (output / "bhavcopy_manifest.json").write_text(
+                '{"complete": true, "cached_sessions": 1, "missing_dates": []}', encoding="utf-8"
+            )
+            manifest = build_manifest(
+                output,
+                requested_date="20260813",
+                actual_date="20260813",
+                attempted_dates=["20260813"],
+                source_mode="requested_session",
+                lookback=1,
+            )
+            self.assertEqual(manifest["source"]["provider"], "NSE")
+            self.assertEqual(manifest["source"]["price_adjustment_policy"], "unadjusted_ohlc")
+            self.assertTrue(manifest["history"]["complete"])
+            self.assertEqual(manifest["history"]["cache_manifest"], "bhavcopy_manifest.json")
+
     def test_site_contract_rejects_missing_manifest(self):
         with TemporaryDirectory() as tmp:
             site = Path(tmp)

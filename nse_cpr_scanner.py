@@ -22,11 +22,12 @@ Usage:
 from __future__ import annotations
 
 import io
+import json
 import sys
 import time
 import zipfile
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import List, Optional
 from zoneinfo import ZoneInfo
@@ -38,6 +39,8 @@ import requests
 from cpr_contract import (
     CPR_NARROW_MAX_PCT,
     CPR_WIDE_MIN_PCT,
+    DATA_POLICY_VERSION,
+    PRICE_ADJUSTMENT_POLICY,
     calculate_cpr_frame,
 )
 from cpr_scoring import SCORE_FIELDS, attach_confirmation_score
@@ -96,6 +99,10 @@ SMA_SLOW = 100
 MARKET_SYMBOL = "NIFTY"
 WATCHLIST_SETUPS = ("Long", "Short", "Watch Long", "Watch Short", "Watch")
 BHAVCOPY_SLIM_COLS = ["SYMBOL", "SERIES", "NAME", "OPEN", "HIGH", "LOW", "CLOSE", "VOLUME", "VALUE"]
+DOWNLOAD_RETRIES = 3
+DOWNLOAD_BACKOFF_SECONDS = 1.0
+CACHE_MANIFEST_NAME = "bhavcopy_manifest.json"
+_HISTORY_PANEL_CACHE: dict[tuple[str, tuple[str, ...]], pd.DataFrame] = {}
 
 # ETFs, AMC schemes, index funds, gilt/liquid products listed as EQ.
 NON_EQUITY_NAME = (
@@ -136,28 +143,62 @@ def _nse_session() -> requests.Session:
     return session
 
 
-def download_bhavcopy(url: str, date: str, session: Optional[requests.Session] = None) -> Optional[pd.DataFrame]:
-    """Download and unzip an NSE bhavcopy CSV."""
+def download_bhavcopy(
+    url: str,
+    date: str,
+    session: Optional[requests.Session] = None,
+    retries: int = DOWNLOAD_RETRIES,
+    backoff_seconds: float = DOWNLOAD_BACKOFF_SECONDS,
+) -> Optional[pd.DataFrame]:
+    """Download and unzip an NSE bhavcopy CSV with bounded retry/backoff.
+
+    Missing archive dates (404) are treated as unavailable sessions. Timeouts,
+    connection failures, rate limits, and server errors are retried; callers
+    still receive ``None`` after the bounded retry budget is exhausted.
+    """
     formatted_url = url.format(date=date)
     print(f"Downloading: {formatted_url}")
     own_session = session is None
     session = session or _nse_session()
     try:
-        response = session.get(formatted_url, timeout=45)
-        response.raise_for_status()
-        if formatted_url.endswith(".zip"):
-            with zipfile.ZipFile(io.BytesIO(response.content)) as z:
-                csv_filename = next(
-                    (name for name in z.namelist() if name.lower().endswith(".csv")),
-                    z.namelist()[0],
-                )
-                with z.open(csv_filename) as f:
-                    df = pd.read_csv(f)
-        else:
-            df = pd.read_csv(io.BytesIO(response.content))
-        return df
-    except Exception as exc:
-        print(f"Error downloading {formatted_url}: {exc}")
+        for attempt in range(max(int(retries), 0) + 1):
+            try:
+                response = session.get(formatted_url, timeout=45)
+                if response.status_code == 404:
+                    print(f"Archive unavailable for {date}: HTTP 404")
+                    return None
+                if response.status_code == 429 or response.status_code >= 500:
+                    response.raise_for_status()
+                else:
+                    response.raise_for_status()
+                if formatted_url.endswith(".zip"):
+                    with zipfile.ZipFile(io.BytesIO(response.content)) as z:
+                        csv_filename = next(
+                            (name for name in z.namelist() if name.lower().endswith(".csv")),
+                            z.namelist()[0],
+                        )
+                        with z.open(csv_filename) as f:
+                            return pd.read_csv(f)
+                return pd.read_csv(io.BytesIO(response.content))
+            except requests.HTTPError as exc:
+                status = getattr(exc.response, "status_code", None)
+                transient = status == 429 or (status is not None and status >= 500)
+                if not transient or attempt >= retries:
+                    print(f"Error downloading {formatted_url}: {exc}")
+                    return None
+                delay = backoff_seconds * (2 ** attempt)
+                print(f"Transient NSE error ({status}); retrying in {delay:.1f}s")
+                time.sleep(delay)
+            except (requests.RequestException, zipfile.BadZipFile, pd.errors.ParserError, OSError) as exc:
+                if attempt >= retries:
+                    print(f"Error downloading {formatted_url}: {exc}")
+                    return None
+                delay = backoff_seconds * (2 ** attempt)
+                print(f"NSE download attempt failed; retrying in {delay:.1f}s: {exc}")
+                time.sleep(delay)
+            except Exception as exc:
+                print(f"Error downloading {formatted_url}: {exc}")
+                return None
         return None
     finally:
         if own_session:
@@ -283,6 +324,54 @@ def bhavcopy_cache_dir(output_dir: Optional[Path] = None) -> Path:
     return root / "bhavcopy"
 
 
+def bhavcopy_manifest_path(output_dir: Optional[Path] = None) -> Path:
+    root = Path(output_dir) if output_dir is not None else OUTPUT_DIR
+    return root / CACHE_MANIFEST_NAME
+
+
+def write_bhavcopy_manifest(
+    end_date: str,
+    requested_sessions: int,
+    cached_dates: list[str],
+    attempted_dates: list[str],
+    output_dir: Optional[Path] = None,
+) -> Path:
+    """Persist cache quality metadata without storing raw market rows in the manifest."""
+    path = bhavcopy_manifest_path(output_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    attempted = list(dict.fromkeys(str(value) for value in attempted_dates))
+    cached = sorted(set(str(value) for value in cached_dates), reverse=True)
+    missing = [date for date in attempted if date not in set(cached)]
+    payload = {
+        "schema_version": 1,
+        "generated_at_utc": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
+        "end_date": str(end_date),
+        "requested_sessions": int(requested_sessions),
+        "cached_sessions": len(cached),
+        "attempted_dates": attempted,
+        "missing_dates": missing,
+        "complete": len(cached) >= int(requested_sessions),
+        "price_adjustment_policy": PRICE_ADJUSTMENT_POLICY,
+        "data_policy_version": DATA_POLICY_VERSION,
+        "session_timezone": "Asia/Kolkata",
+    }
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    temporary.replace(path)
+    return path
+
+
+def read_bhavcopy_manifest(output_dir: Optional[Path] = None) -> dict:
+    path = bhavcopy_manifest_path(output_dir)
+    if not path.exists():
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        return payload if isinstance(payload, dict) else {}
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
 def session_date_window(end_date: str, sessions: int = HISTORY_LOOKBACK_HTF, calendar_pad: int = 130) -> List[str]:
     """Newest-first weekday dates, padded so holidays can be skipped.
 
@@ -315,8 +404,10 @@ def ensure_bhavcopy_history(
     own = session is None
     session = session or _nse_session()
     got: List[str] = []
+    attempted: List[str] = []
     try:
         for date in session_date_window(end_date, lookback):
+            attempted.append(date)
             if len(got) >= lookback:
                 break
             path = cache / f"cm_{date}.csv"
@@ -340,6 +431,13 @@ def ensure_bhavcopy_history(
     finally:
         if own:
             session.close()
+    write_bhavcopy_manifest(
+        end_date=end_date,
+        requested_sessions=lookback,
+        cached_dates=got,
+        attempted_dates=attempted,
+        output_dir=output_dir,
+    )
     print(f"Bhavcopy history: {len(got)} sessions ending {end_date}")
     return got
 
@@ -367,6 +465,10 @@ def cached_history_dates(end_date: str, output_dir: Optional[Path] = None, lookb
 
 def load_history_panel(dates: List[str], output_dir: Optional[Path] = None) -> pd.DataFrame:
     cache = bhavcopy_cache_dir(output_dir)
+    cache_key = (str(cache.resolve()), tuple(str(date) for date in dates))
+    cached = _HISTORY_PANEL_CACHE.get(cache_key)
+    if cached is not None:
+        return cached.copy()
     frames = []
     for date in dates:
         path = cache / f"cm_{date}.csv"
@@ -379,7 +481,12 @@ def load_history_panel(dates: List[str], output_dir: Optional[Path] = None) -> p
         frames.append(compute_cpr(df))
     if not frames:
         return pd.DataFrame()
-    return pd.concat(frames, ignore_index=True)
+    panel = pd.concat(frames, ignore_index=True)
+    # Keep the cache bounded to the latest few distinct requests in this process.
+    if len(_HISTORY_PANEL_CACHE) >= 4:
+        _HISTORY_PANEL_CACHE.pop(next(iter(_HISTORY_PANEL_CACHE)))
+    _HISTORY_PANEL_CACHE[cache_key] = panel.copy()
+    return panel
 
 
 def scan_from_cached_bhavcopy(
@@ -658,7 +765,6 @@ def attach_history_features(
     hist = hist.sort_values(["SYMBOL", "session"])
     today, tech = attached_history_features(hist, own_window, min_history)
 
-    latest = hist["session"].max()
     regime = market_regime(hist)
 
     out["SYMBOL"] = out["SYMBOL"].astype(str).str.strip().str.upper()

@@ -274,7 +274,7 @@ with tab_backtest:
     with b4:
         capital = st.number_input("Capital", min_value=10000, value=100000, step=10000, key="bt_capital")
 
-    c1, c2, c3 = st.columns(3)
+    c1, c2, c3, c4 = st.columns(4)
     with c1:
         risk_pct = st.number_input(
             "Risk % per trade", min_value=0.001, max_value=0.05, value=0.01, step=0.005, key="bt_risk"
@@ -282,9 +282,18 @@ with tab_backtest:
     with c2:
         cost_bps = st.number_input("Cost (bps round-trip)", min_value=0.0, value=5.0, step=1.0, key="bt_cost")
     with c3:
-        st.write("")
-        st.write("")
-        run_bt = st.button("▶️ Run backtest", type="primary", use_container_width=True)
+        slippage_bps = st.number_input(
+            "Slippage (bps per side)", min_value=0.0, value=0.0, step=1.0,
+            help="Adverse execution allowance applied to both entry and exit.", key="bt_slippage"
+        )
+    with c4:
+        ambiguous_policy = st.selectbox(
+            "Same-bar collision", ["stop_first", "target_first"], index=0,
+            help="If one bar touches stop and target, choose the conservative stop-first rule by default.",
+            key="bt_ambiguous_policy"
+        )
+
+    run_bt = st.button("▶️ Run backtest", type="primary", use_container_width=True)
 
     if run_bt:
         with st.spinner(f"Backtesting {bt_symbol} on {interval}…"):
@@ -299,6 +308,8 @@ with tab_backtest:
                     risk_pct=float(risk_pct),
                     capital=float(capital),
                     cost_bps=float(cost_bps),
+                    slippage_bps=float(slippage_bps),
+                    ambiguous_policy=ambiguous_policy,
                     interval=interval,
                 )
             except Exception as exc:
@@ -321,7 +332,9 @@ with tab_backtest:
         k6.metric("Avg CPR width", f"{bt['avg_cpr_width_pct']}%")
         st.caption(
             f"{bt['symbol']} · {bt.get('interval')} · {bt.get('start')} → {bt.get('end')} · "
-            f"avg win {bt['avg_win_pct']}% / avg loss {bt['avg_loss_pct']}%"
+            f"avg win {bt['avg_win_pct']}% / avg loss {bt['avg_loss_pct']}% · "
+            f"cost {bt.get('cost_bps', cost_bps)} bps · slippage {bt.get('slippage_bps', slippage_bps)} bps/side · "
+            f"collision {bt.get('ambiguous_policy', ambiguous_policy)}"
         )
         tdf = bt.get("trades_df")
         if tdf is not None and not tdf.empty:
@@ -351,6 +364,7 @@ This app on **port 8502** is a **second screener**:
 3. On `{interval}` bars, **long** after {confirm_bars} close(s) above TC, **short** after {confirm_bars} close(s) below BC
 4. Only the **first** signal of the session
 5. Stop at BC (long) or TC (short); target = **{rr_target:.1f}×** risk; flatten at **15:15 IST**
+6. Backtests apply configured cost and slippage; gap exits fill at the bar open; same-bar stop/target collisions use the selected policy (default: stop-first)
 
 Yahoo Finance does not provide years of 15-minute history. Backtests on 15m/5m are capped at about 60 days.
 

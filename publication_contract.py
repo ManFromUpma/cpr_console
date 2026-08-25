@@ -13,6 +13,8 @@ from typing import Iterable, Optional
 
 import pandas as pd
 
+from cpr_contract import DATA_POLICY_VERSION, PRICE_ADJUSTMENT_POLICY
+
 
 MANIFEST_NAME = "publication_manifest.json"
 SCHEMA_VERSION = 1
@@ -140,7 +142,15 @@ def build_manifest(
 ) -> dict:
     """Build the publication metadata written beside the generated CSVs."""
     attempted = list(dict.fromkeys(str(value) for value in attempted_dates))
-    history = _history_dates(Path(output_dir))
+    output_dir = Path(output_dir)
+    history = _history_dates(output_dir)
+    cache_manifest = {}
+    cache_path = output_dir / "bhavcopy_manifest.json"
+    if cache_path.exists():
+        try:
+            cache_manifest = json.loads(cache_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            cache_manifest = {}
     freshness_status = "unknown" if source_mode == "site_only" else "known"
     return {
         "schema_version": SCHEMA_VERSION,
@@ -150,7 +160,11 @@ def build_manifest(
         "source": {
             "name": "NSE UDI bhavcopy",
             "mode": source_mode,
+            "provider": "NSE",
             "attempted_dates": attempted,
+            "session_timezone": "Asia/Kolkata",
+            "price_adjustment_policy": PRICE_ADJUSTMENT_POLICY,
+            "data_policy_version": DATA_POLICY_VERSION,
         },
         "freshness": {
             "status": freshness_status,
@@ -164,6 +178,9 @@ def build_manifest(
             "requested_sessions": int(lookback),
             "cached_sessions": len(history),
             "oldest_cached_date": history[-1] if history else None,
+            "complete": bool(cache_manifest.get("complete", len(history) >= int(lookback) if lookback else True)),
+            "missing_dates": cache_manifest.get("missing_dates", []),
+            "cache_manifest": cache_path.name if cache_manifest else None,
         },
     }
 

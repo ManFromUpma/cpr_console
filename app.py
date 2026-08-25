@@ -595,6 +595,9 @@ def fetch_and_calculate_cpr(
         
         if result is not None:
             row = result.to_dict()
+            row["Data Source"] = ohlcv.data_source
+            row["Price Adjustment Policy"] = ohlcv.price_adjustment_policy
+            row["Session Timezone"] = session_timezone
             row["Segment"] = classify_symbol(symbol)
             all_results.append(row)
     

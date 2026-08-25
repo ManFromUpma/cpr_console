@@ -42,8 +42,21 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r requirements-ci.txt
 
-      - name: Run test suite
-        run: python -m unittest discover -v
+      - name: Compile Python sources
+        run: python -m compileall -q .
+
+      - name: Run test suite with coverage
+        run: |
+          python -m coverage run --branch -m unittest discover -v
+          python -m coverage report --show-missing
+
+      - name: Run static checks on new and hardened modules
+        run: |
+          ruff check --select E,F,W --ignore E501,W293 \
+            expert_review_agent.py run_expert_review.py \
+            test_expert_review_agent.py test_actionable_hardening.py \
+            cpr_breakout_engine.py nse_cpr_scanner.py \
+            publication_contract.py data_provider.py
 
       - name: Scan and build site
         env:

@@ -708,11 +708,16 @@ function publicationStatus() {
   const p = DATA.publication || {};
   const freshness = p.freshness || {};
   const source = p.source || {};
+  const history = p.history || {};
   const actual = p.actual_data_date || "unknown";
+  const policy = source.price_adjustment_policy || "policy unknown";
+  const cached = history.cached_sessions ?? "?";
+  const requested = history.requested_sessions ?? "?";
+  const cacheText = history.complete === false ? ` · history incomplete (${cached}/${requested})` : ` · history ${cached}/${requested}`;
   const el = $("dataStatus");
   if (!el) return;
-  el.textContent = `${freshness.display || "Publication freshness unknown"} · data session ${actual} · source ${source.name || "unknown"}`;
-  if (freshness.status !== "known") el.style.borderColor = "var(--bear)";
+  el.textContent = `${freshness.display || "Publication freshness unknown"} · data session ${actual} · source ${source.name || "unknown"} · ${policy} · ${source.session_timezone || "timezone unknown"}${cacheText}`;
+  if (freshness.status !== "known" || history.complete === false) el.style.borderColor = "var(--bear)";
 }
 
 function downloads() {

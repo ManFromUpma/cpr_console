@@ -168,3 +168,36 @@ class TestSignalsAndTrades(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestExecutionModel(unittest.TestCase):
+    def test_slippage_is_recorded_and_reduces_long_entry(self):
+        test = TestSignalsAndTrades()
+        m = test._frame([105.0, 105.8, 108.0])
+        m.loc[m.index[2], "high"] = 108.5
+        trades, _, _ = simulate_trades(m, rr_target=2.0, cost_bps=0.0, slippage_bps=10.0, capital=100000)
+        self.assertEqual(len(trades), 1)
+        self.assertEqual(float(trades.iloc[0]["slippage_bps"]), 10.0)
+        self.assertGreater(float(trades.iloc[0]["entry"]), float(trades.iloc[0]["entry_raw"]))
+
+    def test_stop_first_ambiguous_bar_is_reported(self):
+        test = TestSignalsAndTrades()
+        m = test._frame([105.0, 105.8, 106.0])
+        # The post-entry bar touches both BC and TP; conservative policy chooses stop.
+        m.loc[m.index[2], "low"] = 104.0
+        m.loc[m.index[2], "high"] = 108.0
+        trades, _, _ = simulate_trades(m, rr_target=2.0, cost_bps=0.0, ambiguous_policy="stop_first")
+        self.assertEqual(len(trades), 1)
+        self.assertTrue(bool(trades.iloc[0]["ambiguous_bar"]))
+        self.assertEqual(trades.iloc[0]["exit_reason"], "stop_first_ambiguous")
+
+    def test_stop_gap_uses_open_and_is_reported(self):
+        test = TestSignalsAndTrades()
+        m = test._frame([105.0, 105.8, 104.0])
+        m.loc[m.index[2], "open"] = 103.0
+        m.loc[m.index[2], "low"] = 102.5
+        trades, _, _ = simulate_trades(m, rr_target=2.0, cost_bps=0.0)
+        self.assertEqual(len(trades), 1)
+        self.assertTrue(bool(trades.iloc[0]["gap_exit"]))
+        self.assertEqual(trades.iloc[0]["exit_reason"], "stop_gap")
+        self.assertEqual(float(trades.iloc[0]["exit_raw"]), 103.0)

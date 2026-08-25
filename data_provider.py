@@ -72,6 +72,7 @@ class OHLCVData:
         fetch_timestamp: datetime,
         session_timezone: str = "Asia/Kolkata",
         current_quote: Optional[Dict] = None,
+        price_adjustment_policy: str = "unadjusted_ohlc",
     ):
         self.symbol = symbol
         self.df = df  # Must have columns: ['open', 'high', 'low', 'close', 'volume']
@@ -79,6 +80,7 @@ class OHLCVData:
         self.fetch_timestamp = fetch_timestamp
         self.session_timezone = pytz.timezone(_timezone_name(session_timezone))
         self.current_quote = current_quote or {}
+        self.price_adjustment_policy = price_adjustment_policy
 
     def _index_date(self, ts) -> Optional[datetime.date]:
         stamp = pd.Timestamp(ts)
