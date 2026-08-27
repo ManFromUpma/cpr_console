@@ -39,6 +39,22 @@ A clean, practical Central Pivot Range (CPR) screening console for equities. Des
 
 ---
 
+## 🧰 Mac Tinker Lab
+
+This repository also includes a **54-tool MacBook tinkering lab**: individually runnable Python utilities for system observation, storage and metadata exploration, networking, launchd/plist inspection, developer-workspace hygiene, text and data experiments, image metadata, local logs, Spotlight, and small macOS automation exercises. The tools are safe-by-default and documented with beginner analogies plus deeper technical explanations.
+
+Start with the [Mac Tinker Lab guide](MAC_TINKER_GUIDE.md), browse the [tool catalog](mac_tinker/tool_catalog.txt), or run a tool directly:
+
+```bash
+python3 tools/system_snapshot.py
+python3 tools/large_files.py ~/Downloads --count 10
+python3 tools/unicode_inspector.py "café ☕"
+```
+
+The lab does not replace the CPR Console or change its market-data behavior.
+
+---
+
 ## 🚀 Quick Start
 
 ### Prerequisites
@@ -73,8 +89,11 @@ cpr_console/
 ├── data_provider.py        # Data source adapter (Perplexity Finance / Mock)
 ├── requirements.txt        # Python dependencies
 ├── sample_symbols.csv      # Sample NSE symbols
-├── test_cpr.py             # Unit tests
-└── README.md               # This file
+├── test_cpr.py             # CPR unit tests
+├── test_mac_tinker.py      # Mac Tinker Lab smoke tests
+├── MAC_TINKER_GUIDE.md     # Layman guide and deep dives
+├── mac_tinker/             # Shared helpers and importable tool modules
+└── tools/                  # Individually runnable tool wrappers
 ```
 
 ---
