@@ -1,10 +1,10 @@
 {
-  "actual_data_date": "20260910",
+  "actual_data_date": "20260911",
   "freshness": {
     "display": "Source session verified",
     "status": "known"
   },
-  "generated_at_utc": "2026-09-10T15:03:03+00:00",
+  "generated_at_utc": "2026-09-11T15:15:24+00:00",
   "history": {
     "cache_manifest": "bhavcopy_manifest.json",
     "cached_sessions": 252,
@@ -24,16 +24,16 @@
       "20251105",
       "20251022",
       "20251002",
-      "20250903"
+      "20250904"
     ],
-    "oldest_cached_date": "20250904",
+    "oldest_cached_date": "20250905",
     "requested_sessions": 252
   },
   "requested_date": null,
   "schema_version": 1,
   "source": {
     "attempted_dates": [
-      "20260910"
+      "20260911"
     ],
     "data_policy_version": 1,
     "mode": "latest_available",
