@@ -4,7 +4,7 @@
     "display": "Source session verified",
     "status": "known"
   },
-  "generated_at_utc": "2026-10-01T17:24:47+00:00",
+  "generated_at_utc": "2026-10-02T16:40:38+00:00",
   "history": {
     "cache_manifest": "bhavcopy_manifest.json",
     "cached_sessions": 252,
@@ -34,6 +34,7 @@
   "schema_version": 1,
   "source": {
     "attempted_dates": [
+      "20261002",
       "20261001"
     ],
     "data_policy_version": 1,
